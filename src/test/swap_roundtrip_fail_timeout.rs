@@ -35,8 +35,7 @@ async fn swap_fail_timeout() {
     open_channel(node2_addr, &node1_pubkey, NODE2_PEER_PORT, 5000000, 546000).await;
 
     // Create a swap with a timeout of 1 second
-    let maker_init_response =
-        maker_init(node1_addr, 10, &asset_id, MakerInitSide::Buy, 1, 5000).await;
+    let maker_init_response = maker_init(node1_addr, 10, &asset_id, MakerSide::Buy, 1, 5000).await;
     tokio::time::sleep(Duration::from_secs(2)).await;
     taker(node2_addr, maker_init_response.swapstring.clone()).await;
 }

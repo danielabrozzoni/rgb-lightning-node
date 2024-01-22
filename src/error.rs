@@ -22,8 +22,8 @@ pub enum APIError {
     #[error("Cannot call other APIs while node is changing state")]
     ChangingState,
 
-    #[error("Expired")]
-    Expired,
+    #[error("The swap offer has expired")]
+    ExpiredSwapOffer,
 
     #[error("Failed closing channel: {0}")]
     FailedClosingChannel(String),
@@ -58,7 +58,10 @@ pub enum APIError {
     #[error("Failed to start LDK: {0}")]
     FailedStartingLDK(String),
 
-    #[error("Not enough assets, available: {0}, needed: {1}")]
+    #[error("For an RGB operation both asset_id and asset_amount must be set")]
+    IncompleteRGBInfo,
+
+    #[error("Not enough assets, available: {0}, requested: {1}")]
     InsufficientAssets(u64, u64),
 
     #[error("Not enough funds, call getaddress and send {0} satoshis")]
@@ -66,9 +69,6 @@ pub enum APIError {
 
     #[error("Invalid amount: {0}")]
     InvalidAmount(String),
-
-    #[error("Invalid argument: {0}")]
-    InvalidArgument(String),
 
     #[error("Invalid asset ID: {0}")]
     InvalidAssetID(String),
@@ -97,6 +97,9 @@ pub enum APIError {
     #[error("Invalid onion data: {0}")]
     InvalidOnionData(String),
 
+    #[error("Invalid payment secret")]
+    InvalidPaymentSecret,
+
     #[error("Invalid password: {0}")]
     InvalidPassword(String),
 
@@ -109,8 +112,8 @@ pub enum APIError {
     #[error("Invalid pubkey")]
     InvalidPubkey,
 
-    #[error("Invalid swap string: {0}")]
-    InvalidSwapString(String),
+    #[error("Invalid swap string '{0}': {1}")]
+    InvalidSwapString(String, String),
 
     #[error("Invalid ticker: {0}")]
     InvalidTicker(String),
@@ -129,6 +132,9 @@ pub enum APIError {
 
     #[error("Node is locked (hint: call unlock)")]
     LockedNode,
+
+    #[error("Unable to find payment preimage, be sure you've provided the correct swap info")]
+    MissingSwapPaymentPreimage,
 
     #[error("No uncolored UTXOs are available (hint: call createutxos)")]
     NoAvailableUtxos,
@@ -185,13 +191,12 @@ impl IntoResponse for APIError {
             | APIError::FailedSendingOnionMessage(_)
             | APIError::FailedStartingLDK(_)
             | APIError::IO(_)
-            | APIError::NoRoute
             | APIError::Proxy(_)
             | APIError::Unexpected => (StatusCode::INTERNAL_SERVER_ERROR, self.to_string()),
             APIError::AnchorsRequired
-            | APIError::Expired
+            | APIError::ExpiredSwapOffer
+            | APIError::IncompleteRGBInfo
             | APIError::InvalidAmount(_)
-            | APIError::InvalidArgument(_)
             | APIError::InvalidAssetID(_)
             | APIError::InvalidBackupPath
             | APIError::InvalidBlindedUTXO(_)
@@ -201,14 +206,16 @@ impl IntoResponse for APIError {
             | APIError::InvalidName(_)
             | APIError::InvalidNodeIds(_)
             | APIError::InvalidOnionData(_)
+            | APIError::InvalidPaymentSecret
             | APIError::InvalidPassword(_)
             | APIError::InvalidPeerInfo(_)
             | APIError::InvalidPrecision(_)
             | APIError::InvalidPubkey
-            | APIError::InvalidSwapString(_)
+            | APIError::InvalidSwapString(_, _)
             | APIError::InvalidTicker(_)
             | APIError::InvalidTlvType(_)
             | APIError::InvalidTransportEndpoints(_)
+            | APIError::MissingSwapPaymentPreimage
             | APIError::OutputBelowDustLimit
             | APIError::UnsupportedBackupVersion { .. } => {
                 (StatusCode::BAD_REQUEST, self.to_string())
@@ -221,6 +228,7 @@ impl IntoResponse for APIError {
             | APIError::InsufficientFunds(_)
             | APIError::LockedNode
             | APIError::NoAvailableUtxos
+            | APIError::NoRoute
             | APIError::NotInitialized
             | APIError::RecipientIDAlreadyUsed
             | APIError::UnknownContractId

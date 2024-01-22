@@ -1,11 +1,12 @@
 use amplify::s;
 use bdk::keys::bip39::Mnemonic;
+use bitcoin::hashes::hex::ToHex;
 use bitcoin::secp256k1::PublicKey;
 use bitcoin::Network;
 use futures::Future;
 use lightning::ln::msgs::SocketAddress;
-use lightning::ln::PaymentHash;
-use lightning::rgb_utils::{BITCOIN_NETWORK_FNAME, ELECTRUM_URL_FNAME};
+use lightning::ln::{channelmanager::ChannelDetails, PaymentHash};
+use lightning::rgb_utils::{get_rgb_channel_info, BITCOIN_NETWORK_FNAME, ELECTRUM_URL_FNAME};
 use lightning::{
     onion_message::OnionMessageContents,
     sign::KeysManager,
@@ -24,7 +25,7 @@ use std::{
     path::Path,
     str::FromStr,
     sync::{Arc, Mutex, MutexGuard},
-    time::Duration,
+    time::{Duration, SystemTime},
 };
 use tokio::sync::{Mutex as TokioMutex, MutexGuard as TokioMutexGuard};
 use tokio_util::sync::CancellationToken;
@@ -92,8 +93,7 @@ pub(crate) struct StaticState {
     pub(crate) bitcoind_client: Arc<BitcoindClient>,
 }
 
-pub(crate) type MakerTrades = HashMap<PaymentHash, (ContractId, SwapType)>;
-pub(crate) type TakerTrades = HashMap<PaymentHash, (ContractId, SwapType)>;
+pub(crate) type TradeMap = HashMap<PaymentHash, (ContractId, SwapType)>;
 
 pub(crate) struct UnlockedAppState {
     pub(crate) channel_manager: Arc<ChannelManager>,
@@ -106,8 +106,8 @@ pub(crate) struct UnlockedAppState {
     pub(crate) fs_store: Arc<FilesystemStore>,
     pub(crate) persister: Arc<FilesystemStore>,
     pub(crate) bump_tx_event_handler: Arc<BumpTxEventHandler>,
-    pub(crate) maker_trades: Arc<Mutex<MakerTrades>>,
-    pub(crate) taker_trades: Arc<Mutex<TakerTrades>>,
+    pub(crate) maker_trades: Arc<Mutex<TradeMap>>,
+    pub(crate) taker_trades: Arc<Mutex<TradeMap>>,
     pub(crate) rgb_wallet: Arc<Mutex<RgbLibWallet>>,
     pub(crate) rgb_online: Online,
     pub(crate) router: Arc<Router>,
@@ -420,4 +420,31 @@ pub(crate) async fn start_daemon(args: LdkUserInfo) -> Result<Arc<AppState>, App
         ldk_background_services: Arc::new(Mutex::new(None)),
         changing_state: Mutex::new(false),
     }))
+}
+
+pub fn get_current_timestamp() -> u64 {
+    SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .unwrap()
+        .as_secs()
+}
+
+pub fn get_max_local_rgb_amount<'r>(
+    contract_id: ContractId,
+    ldk_data_dir_path: &Path,
+    channels: impl Iterator<Item = &'r ChannelDetails>,
+) -> u64 {
+    let mut max_balance = 0;
+    for chan_info in channels {
+        let info_file_path = ldk_data_dir_path.join(chan_info.channel_id.to_hex());
+        if !info_file_path.exists() {
+            continue;
+        }
+        let (rgb_info, _) = get_rgb_channel_info(&chan_info.channel_id, ldk_data_dir_path);
+        if rgb_info.contract_id == contract_id && rgb_info.local_rgb_amount > max_balance {
+            max_balance = rgb_info.local_rgb_amount;
+        }
+    }
+
+    max_balance
 }

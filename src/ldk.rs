@@ -668,37 +668,33 @@ async fn handle_ldk_events(
 
                 let state_copy = unlocked_state.clone();
                 let psbt_str_copy = psbt_str.clone();
-                let _txid =
+                let _txid = tokio::task::spawn_blocking(move || {
                     if is_channel_rgb(&channel_id, &PathBuf::from(&static_state.ldk_data_dir)) {
-                        tokio::task::spawn_blocking(move || {
-                            state_copy.rgb_send_end(psbt_str_copy).unwrap()
-                        })
+                        state_copy.rgb_send_end(psbt_str_copy).unwrap()
                     } else {
-                        tokio::task::spawn_blocking(move || {
-                            state_copy.rgb_send_btc_end(psbt_str_copy).unwrap()
-                        })
+                        state_copy.rgb_send_btc_end(psbt_str_copy).unwrap()
                     }
-                    .await
-                    .unwrap();
+                })
+                .await
+                .unwrap();
             } else {
                 // acceptor
                 let consignment_path =
                     format!("{}/consignment_{funding_txid}", static_state.ldk_data_dir);
-                if let Ok(consignment) = Bindle::<RgbTransfer>::load(consignment_path) {
-                    let contract_id = consignment.contract_id();
-                    let schema_id = consignment.schema_id().to_string();
-                    let asset_schema = AssetSchema::from_schema_id(schema_id).unwrap();
-                    let mut runtime = get_rgb_runtime(Path::new(&static_state.ldk_data_dir));
+                if !Path::new(&consignment_path).exists() {
+                    return;
+                }
+                let consignment = Bindle::<RgbTransfer>::load(consignment_path)
+                    .expect("successful consignment load");
+                let contract_id = consignment.contract_id();
+                let schema_id = consignment.schema_id().to_string();
+                let asset_schema = AssetSchema::from_schema_id(schema_id).unwrap();
+                let mut runtime = get_rgb_runtime(Path::new(&static_state.ldk_data_dir));
 
-                    match unlocked_state.rgb_save_new_asset(
-                        &mut runtime,
-                        &asset_schema,
-                        contract_id,
-                    ) {
-                        Ok(_) => {}
-                        Err(e) if e.to_string().contains("UNIQUE constraint failed") => {}
-                        Err(e) => panic!("Failed saving asset: {}", e),
-                    }
+                match unlocked_state.rgb_save_new_asset(&mut runtime, &asset_schema, contract_id) {
+                    Ok(_) => {}
+                    Err(e) if e.to_string().contains("UNIQUE constraint failed") => {}
+                    Err(e) => panic!("Failed saving asset: {}", e),
                 }
             }
         }
@@ -760,9 +756,7 @@ async fn handle_ldk_events(
             }
 
             let get_rgb_info = |channel_id| {
-                let is_colored =
-                    is_channel_rgb(channel_id, &PathBuf::from(&static_state.ldk_data_dir));
-                if is_colored {
+                if is_channel_rgb(channel_id, &PathBuf::from(&static_state.ldk_data_dir)) {
                     let (rgb_info, _) = get_rgb_channel_info(
                         channel_id,
                         &PathBuf::from(&static_state.ldk_data_dir),
@@ -811,18 +805,18 @@ async fn handle_ldk_events(
 
             match whitelist_swap_type {
                 crate::swap::SwapType::BuyAsset {
-                    amount_rgb,
-                    amount_msats,
+                    asset_amount,
+                    amt_msat,
                 } => {
                     // We subtract HTLC_MIN_MSAT because a node receiving an RGB payment also receives that amount of sats with it as the payment amount,
                     // so we exclude it from the calculation of how many sats we are effectively giving out.
-                    let net_msat_diff = (expected_outbound_amount_msat).saturating_sub(
+                    let net_msat_diff = expected_outbound_amount_msat.saturating_sub(
                         inbound_amount_msat.saturating_sub(crate::routes::HTLC_MIN_MSAT),
                     );
 
-                    if inbound_rgb_amount != Some(*amount_rgb)
+                    if inbound_rgb_amount != Some(*asset_amount)
                         || inbound_rgb_info.map(|x| x.0) != Some(*whitelist_contract_id)
-                        || net_msat_diff != *amount_msats
+                        || net_msat_diff != *amt_msat
                         || outbound_rgb_info.is_some()
                     {
                         tracing::error!(
@@ -836,15 +830,15 @@ async fn handle_ldk_events(
                     }
                 }
                 crate::swap::SwapType::SellAsset {
-                    amount_rgb,
-                    amount_msats,
+                    asset_amount,
+                    amt_msat,
                 } => {
                     let net_msat_diff =
                         inbound_amount_msat.saturating_sub(expected_outbound_amount_msat);
 
-                    if expected_outbound_rgb_amount != Some(*amount_rgb)
+                    if expected_outbound_rgb_amount != Some(*asset_amount)
                         || outbound_rgb_info.map(|x| x.0) != Some(*whitelist_contract_id)
-                        || net_msat_diff != *amount_msats
+                        || net_msat_diff != *amt_msat
                         || inbound_rgb_info.is_some()
                     {
                         tracing::error!(

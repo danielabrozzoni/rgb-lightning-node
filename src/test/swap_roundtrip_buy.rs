@@ -34,7 +34,7 @@ async fn do_buy_swap() {
     open_channel(node2_addr, &node1_pubkey, NODE2_PEER_PORT, 5000000, 546000).await;
 
     let maker_init_response =
-        maker_init(node1_addr, 10, &asset_id, MakerInitSide::Buy, 3600, 5000).await;
+        maker_init(node1_addr, 10, &asset_id, MakerSide::Buy, 3600, 5000).await;
     let taker_response = taker(node2_addr, maker_init_response.swapstring.clone()).await;
 
     let node1_trades = list_trades(node1_addr).await;
@@ -48,7 +48,7 @@ async fn do_buy_swap() {
         node1_addr,
         maker_init_response.swapstring,
         maker_init_response.payment_secret,
-        taker_response.our_pubkey,
+        node2_pubkey,
     )
     .await;
 

@@ -25,6 +25,8 @@ tags:
     description: APIs to perform on-chain operations
   - name: RGB
     description: APIs to perform RGB operations
+  - name: Swaps
+    description: APIs to perform asset swaps
   - name: Other
     description: APIs to perform other operations
 paths:
@@ -432,8 +434,8 @@ paths:
     post:
       tags:
         - Swaps
-      summary: Maker init API
-      description: Init the swap on the maker side
+      summary: Init a maker swap
+      description: Init a swap on the maker side
       requestBody:
         content:
           application/json:
@@ -450,8 +452,8 @@ paths:
     post:
       tags:
         - Swaps
-      summary: Maker execute API
-      description: Execute the swap on the maker side
+      summary: Execute a maker swap
+      description: Execute a swap on the maker side
       requestBody:
         content:
           application/json:
@@ -495,7 +497,7 @@ paths:
       tags:
         - Channels
       summary: Open a channel
-      description: Open a new LN BTC or RGB channel (if both asset_id and asset_amount are specified)
+      description: Open a new LN channel (RGB-enabled when both asset_id and asset_amount are specified)
       requestBody:
         content:
           application/json:
@@ -664,8 +666,8 @@ paths:
     post:
       tags:
         - Swaps
-      summary: Taker API
-      description: Accept the swap on the taker side
+      summary: Accept a swap
+      description: Accept a swap on the taker side
       requestBody:
         content:
           application/json:
@@ -677,7 +679,7 @@ paths:
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/TakerResponse'
+                $ref: '#/components/schemas/EmptyResponse'
   /unlock:
     post:
       tags:
@@ -1079,7 +1081,11 @@ components:
     ListTradesResponse:
       type: object
       properties:
-        transactions:
+        maker:
+          type: array
+          items:
+              $ref: '#/components/schemas/Trade'
+        taker:
           type: array
           items:
               $ref: '#/components/schemas/Trade'
@@ -1127,21 +1133,18 @@ components:
     MakerInitRequest:
       type: object
       properties:
-        amount:
+        asset_amount:
           type: integer
           example: 5000
         asset_id:
           type: string
           example: rgb:2dkSTbr-jFhznbPmo-TQafzswCN-av4gTsJjX-ttx6CNou5-M98k8Zd
         side:
-          type: string
-          enum:
-            - Buy
-            - Sell
-        timeout_secs:
+          $ref: '#/components/schemas/MakerSide'
+        timeout_sec:
           type: integer
           example: 100
-        price_msats_per_token:
+        price_msats_per_asset:
           type: integer
           example: 500
     MakerInitResponse:
@@ -1168,6 +1171,12 @@ components:
         taker_pubkey:
           type: string
           example: 02270dadcd6e7ba0ef707dac72acccae1a3607453a8dd2aef36ff3be4e0d31f043
+    MakerSide:
+      type: string
+      example: Buy
+      enum:
+        - Sell
+        - Buy
     NetworkInfoResponse:
       type: object
       properties:
@@ -1388,12 +1397,6 @@ components:
         swapstring:
             type: string
             example: 2:JuniorAlohaMagnum0F6TKNoZQDCvAasm92crmHqmgr8eur42WY17bZuzJgJJX:buy:2628259:1701256490:9d342c6ba006e24abee84a2e034a22d5e30c1f2599fb9c3574d46d3cde3d65a2
-    TakerResponse:
-      type: object
-      properties:
-        our_pubkey:
-          type: string
-          example: 03b79a4bc1ec365524b4fab9a39eb133753646babb5a1da5c4bc94c53110b7795d
     Trade:
       type: object
       properties:
@@ -1403,17 +1406,14 @@ components:
         amt_msat:
           type: integer
           example: 3000000
-        amt_rgb:
+        asset_amount:
           type: integer
           example: 10
         asset_id:
           type: string
           example: rgb:2dkSTbr-jFhznbPmo-TQafzswCN-av4gTsJjX-ttx6CNou5-M98k8Zd
         side:
-          type: string
-          enum:
-            - Buy
-            - Sell
+          $ref: '#/components/schemas/MakerSide'
     Transaction:
       type: object
       properties:

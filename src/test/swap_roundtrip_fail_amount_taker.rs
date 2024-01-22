@@ -34,14 +34,7 @@ async fn swap_fail_amount_taker() {
     open_colored_channel(node1_addr, &node2_pubkey, NODE2_PEER_PORT, 600, &asset_id).await;
     open_channel(node2_addr, &node1_pubkey, NODE2_PEER_PORT, 5000000, 546000).await;
 
-    let maker_init_response = maker_init(
-        node1_addr,
-        10000,
-        &asset_id,
-        MakerInitSide::Sell,
-        3600,
-        5000,
-    )
-    .await;
+    let maker_init_response =
+        maker_init(node1_addr, 10000, &asset_id, MakerSide::Sell, 3600, 5000).await;
     taker(node2_addr, maker_init_response.swapstring.clone()).await;
 }

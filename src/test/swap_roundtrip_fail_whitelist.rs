@@ -34,7 +34,7 @@ async fn swap_fail_whitelist() {
     open_channel(node2_addr, &node1_pubkey, NODE2_PEER_PORT, 5000000, 546000).await;
 
     let maker_init_response =
-        maker_init(node1_addr, 10, &asset_id, MakerInitSide::Buy, 3600, 5000).await;
+        maker_init(node1_addr, 10, &asset_id, MakerSide::Buy, 3600, 5000).await;
     // We don't execute the taker command, so the swapstring is not going to be whitelisted, and the swap will fail.
     // let taker_response = taker(node2_addr, maker_init_response.swapstring.clone()).await;
     maker_execute(
