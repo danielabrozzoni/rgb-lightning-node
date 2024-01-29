@@ -49,8 +49,8 @@ use tokio::sync::MutexGuard as TokioMutexGuard;
 
 use crate::backup::{do_backup, restore_backup};
 use crate::ldk::{start_ldk, stop_ldk, LdkBackgroundServices, MIN_CHANNEL_CONFIRMATIONS};
-use crate::rgb::get_bitcoin_network;
-use crate::swap::{SwapString, SwapType};
+use crate::rgb::{get_bitcoin_network, get_rgb_channel_info_optional};
+use crate::swap::{parse_opt_asset, Swap, SwapString};
 use crate::utils::{
     check_already_initialized, check_password_strength, check_password_validity,
     encrypt_and_save_mnemonic, get_max_local_rgb_amount, get_mnemonic_path, hex_str,
@@ -343,6 +343,15 @@ pub(crate) struct ListPeersResponse {
 }
 
 #[derive(Debug, Deserialize, Serialize)]
+pub(crate) struct Trade {
+    pub(crate) qty_from: u64,
+    pub(crate) qty_to: u64,
+    pub(crate) from_asset: String,
+    pub(crate) to_asset: String,
+    pub(crate) payment_hash: String,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
 pub(crate) struct ListTradesResponse {
     pub(crate) maker: Vec<Trade>,
     pub(crate) taker: Vec<Trade>,
@@ -388,19 +397,13 @@ pub(crate) struct MakerExecuteRequest {
     pub(crate) taker_pubkey: String,
 }
 
-#[derive(Debug, Deserialize, Serialize)]
-pub(crate) enum MakerSide {
-    Buy,
-    Sell,
-}
-
 #[derive(Deserialize, Serialize)]
 pub(crate) struct MakerInitRequest {
-    pub(crate) asset_amount: u64,
-    pub(crate) asset_id: String,
-    pub(crate) side: MakerSide,
-    pub(crate) timeout_sec: u32,
-    pub(crate) price_msat_per_asset: u64,
+    pub(crate) qty_from: u64,
+    pub(crate) qty_to: u64,
+    pub(crate) from_asset: String,
+    pub(crate) to_asset: String,
+    pub(crate) timeout_secs: u32,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -543,21 +546,18 @@ pub(crate) struct TakerRequest {
     pub(crate) swapstring: String,
 }
 
-#[derive(Debug, Deserialize, Serialize)]
-pub(crate) struct Trade {
-    pub(crate) amt_msat: u64,
-    pub(crate) amt_rgb: u64,
-    pub(crate) side: MakerSide,
-    pub(crate) asset_id: String,
-    pub(crate) payment_hash: String,
+#[derive(Deserialize, Serialize)]
+pub(crate) struct TradeEntry {
+    pub(crate) qty_from: u64,
+    pub(crate) qty_to: u64,
+    pub(crate) from_asset: String,
+    pub(crate) to_asset: String,
 }
 
 #[derive(Deserialize, Serialize)]
-pub(crate) struct TradeEntry {
-    pub(crate) amount: u64,
-    pub(crate) asset_id: String,
-    pub(crate) side: MakerSide,
-    pub(crate) price_msat_per_asset: u64,
+pub(crate) struct TradeListResponse {
+    pub(crate) taker: Vec<TradeEntry>,
+    pub(crate) maker: Vec<TradeEntry>,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -1315,18 +1315,16 @@ pub(crate) async fn list_trades(
 ) -> Result<Json<ListTradesResponse>, APIError> {
     let unlocked_state = state.check_unlocked().await?.clone().unwrap();
 
-    let map_trade =
-        |(payment_hash, (contract_id, swap_type)): (&PaymentHash, &(ContractId, SwapType))| Trade {
-            payment_hash: payment_hash.to_string(),
-            asset_id: contract_id.to_string(),
-            amt_msat: swap_type.amt_msat(),
-            amt_rgb: swap_type.asset_amount(),
-            side: if swap_type.is_buy() {
-                MakerSide::Buy
-            } else {
-                MakerSide::Sell
-            },
-        };
+    let map_trade = |(payment_hash, swap): (&PaymentHash, &Swap)| Trade {
+        payment_hash: payment_hash.to_string(),
+        qty_from: swap.qty_from,
+        qty_to: swap.qty_to,
+        from_asset: swap
+            .from_asset
+            .map(|c| c.to_string())
+            .unwrap_or("btc".into()),
+        to_asset: swap.to_asset.map(|c| c.to_string()).unwrap_or("btc".into()),
+    };
 
     let taker_trades = unlocked_state.taker_trades.lock().unwrap();
     let maker_trades = unlocked_state.maker_trades.lock().unwrap();
@@ -2043,55 +2041,51 @@ pub(crate) async fn maker_init(
         let unlocked_state = state.check_unlocked().await?.clone().unwrap();
         let ldk_data_dir_path = PathBuf::from(state.static_state.ldk_data_dir.clone());
 
-        let contract_id = ContractId::from_str(&payload.asset_id)
-            .map_err(|_| APIError::InvalidAssetID(payload.asset_id.clone()))?;
+        let from_asset = parse_opt_asset(&payload.from_asset)
+            .map_err(|_| APIError::InvalidAssetID(payload.from_asset.clone()))?;
+        let to_asset = parse_opt_asset(&payload.to_asset)
+            .map_err(|_| APIError::InvalidAssetID(payload.to_asset.clone()))?;
 
-        let amt_msat = payload.asset_amount * payload.price_msat_per_asset;
+        let qty_from = payload.qty_from;
+        let qty_to = payload.qty_to;
 
-        let swaptype = match payload.side {
-            MakerSide::Buy => SwapType::BuyAsset {
-                asset_amount: payload.asset_amount,
-                amt_msat,
-            },
-            MakerSide::Sell => SwapType::SellAsset {
-                asset_amount: payload.asset_amount,
-                amt_msat,
-            },
+        let swap = Swap {
+            from_asset,
+            to_asset,
+            qty_from,
+            qty_to,
         };
 
-        // The swapstring is from the point of view of the taker, so if the swapstring is buy a
-        // certain asset, it means that we're selling it. Do we have enough?
-        if swaptype.is_buy() {
+        // The user is buying assets = we (the service) are selling assets. Do we have
+        // enough?
+        if let Some(to_asset) = to_asset {
             let max_balance = get_max_local_rgb_amount(
-                contract_id,
+                to_asset,
                 &ldk_data_dir_path,
                 unlocked_state.channel_manager.list_channels().iter(),
             );
-            if payload.asset_amount > max_balance {
-                return Err(APIError::InsufficientAssets(
-                    max_balance,
-                    payload.asset_amount,
-                ));
+            if swap.qty_to > max_balance {
+                return Err(APIError::InsufficientAssets(max_balance, swap.qty_to));
             }
         }
 
         let (payment_hash, payment_secret) = unlocked_state
             .channel_manager
-            .create_inbound_payment(Some(swaptype.amt_msat()), payload.timeout_sec, None)
+            .create_inbound_payment(Some(546000), payload.timeout_secs, None)
             .unwrap();
         unlocked_state
             .maker_trades
             .lock()
             .unwrap()
-            .insert(payment_hash, (contract_id, swaptype));
+            .insert(payment_hash, swap);
 
-        let expiry = get_current_timestamp() + payload.timeout_sec as u64;
+        let expiry = get_current_timestamp() + payload.timeout_secs as u64;
         let swapstring = format!(
             "{}/{}/{}/{}/{}/{}",
-            payload.asset_amount,
-            payload.asset_id,
-            swaptype,
-            payload.price_msat_per_asset,
+            qty_from,
+            from_asset.map(|c| c.to_string()).unwrap_or("btc".into()),
+            qty_to,
+            to_asset.map(|c| c.to_string()).unwrap_or("btc".into()),
             expiry,
             payment_hash,
         );
@@ -2122,24 +2116,25 @@ pub(crate) async fn taker(
         }
 
         // We are selling assets, do we have enough?
-        if !swapstring.swap_type.is_buy() {
+        if let Some(from_asset) = swapstring.swap.from_asset {
             let max_balance = get_max_local_rgb_amount(
-                swapstring.contract_id,
+                from_asset,
                 &ldk_data_dir_path,
                 unlocked_state.channel_manager.list_channels().iter(),
             );
-            if swapstring.swap_type.asset_amount() > max_balance {
+            if swapstring.swap.qty_from > max_balance {
                 return Err(APIError::InsufficientAssets(
                     max_balance,
-                    swapstring.swap_type.asset_amount(),
+                    swapstring.swap.qty_from,
                 ));
             }
         }
 
-        unlocked_state.taker_trades.lock().unwrap().insert(
-            swapstring.payment_hash,
-            (swapstring.contract_id, swapstring.swap_type),
-        );
+        unlocked_state
+            .taker_trades
+            .lock()
+            .unwrap()
+            .insert(swapstring.payment_hash, swapstring.swap);
 
         Ok(Json(EmptyResponse {}))
     })
@@ -2210,15 +2205,19 @@ pub(crate) async fn maker_execute(
             .get_payment_preimage(swapstring.payment_hash, payment_secret)
             .map_err(|_| APIError::MissingSwapPaymentPreimage)?;
 
-        // The cli takes the swaptype from the point of view of the user (=who wants to do the trade)
-        // In this function we're the market maker (=who sends the payment, completing the user trade)
-        // We swap the swaptype to hopefully make this function easier to read
-        let swaptype = swapstring.swap_type.opposite();
+        let swap = swapstring.swap;
 
         let receive_hints = unlocked_state
             .channel_manager
             .list_usable_channels()
             .iter()
+            .filter(|details| {
+                match get_rgb_channel_info_optional(&details.channel_id, &ldk_data_dir_path) {
+                    _ if swap.from_btc() => true,
+                    Some((rgb_info, _)) if Some(rgb_info.contract_id) == swap.from_asset => true,
+                    _ => false,
+                }
+            })
             .map(|details| {
                 let config = details.counterparty.forwarding_info.as_ref().unwrap();
                 RouteHint(vec![RouteHintHop {
@@ -2240,16 +2239,12 @@ pub(crate) async fn maker_execute(
             &unlocked_state.router,
             unlocked_state.channel_manager.get_our_node_id(),
             taker_pk,
-            if swaptype.is_buy() {
-                Some(swaptype.amt_msat())
+            if swap.to_btc() {
+                Some(swap.qty_to)
             } else {
-                None
+                Some(HTLC_MIN_MSAT)
             },
-            if swaptype.is_buy() {
-                None
-            } else {
-                Some(swapstring.contract_id)
-            },
+            swap.to_asset,
             vec![],
         );
         let second_leg = get_route(
@@ -2257,16 +2252,12 @@ pub(crate) async fn maker_execute(
             &unlocked_state.router,
             taker_pk,
             unlocked_state.channel_manager.get_our_node_id(),
-            if swaptype.is_buy() {
+            if swap.from_btc() {
+                Some(swap.qty_from)
+            } else {
                 Some(HTLC_MIN_MSAT)
-            } else {
-                Some(swaptype.amt_msat())
             },
-            if swaptype.is_buy() {
-                Some(swapstring.contract_id)
-            } else {
-                None
-            },
+            swap.from_asset,
             receive_hints,
         );
 
@@ -2282,7 +2273,7 @@ pub(crate) async fn maker_execute(
 
         // Generally in the last hop the fee_amount is set to the payment amount, so we need to
         // override it depending on what type of swap we are doing
-        if let SwapType::BuyAsset { .. } = swaptype {
+        if swap.to_btc() {
             first_leg.paths[0]
                 .hops
                 .last_mut()
@@ -2301,15 +2292,15 @@ pub(crate) async fn maker_execute(
             .clone()
             .into_iter()
             .map(|mut hop| {
-                if let SwapType::SellAsset { asset_amount, .. } = swaptype {
-                    hop.rgb_amount = Some(asset_amount);
+                if !swap.to_btc() {
+                    hop.rgb_amount = Some(swap.qty_to);
                     hop.payment_amount = HTLC_MIN_MSAT;
                 }
                 hop
             })
             .chain(second_leg.paths[0].hops.clone().into_iter().map(|mut hop| {
-                if let SwapType::BuyAsset { asset_amount, .. } = swaptype {
-                    hop.rgb_amount = Some(asset_amount);
+                if !swap.from_btc() {
+                    hop.rgb_amount = Some(swap.qty_from);
                     hop.payment_amount = HTLC_MIN_MSAT;
                 }
                 hop
@@ -2332,12 +2323,12 @@ pub(crate) async fn maker_execute(
             }),
         };
 
-        if let SwapType::SellAsset { asset_amount, .. } = swaptype {
+        if !swap.to_btc() {
             write_rgb_payment_info_file(
                 &ldk_data_dir_path,
                 &swapstring.payment_hash,
-                swapstring.contract_id,
-                asset_amount,
+                swap.to_asset.unwrap(),
+                swap.qty_to,
                 false,
             );
         }
@@ -2358,11 +2349,17 @@ pub(crate) async fn maker_execute(
             }
         };
 
+        let amt_msat = if swap.to_btc() {
+            swap.qty_to
+        } else {
+            HTLC_MIN_MSAT
+        };
+
         let payment_info = PaymentInfo {
             preimage: None,
             secret: None,
             status,
-            amt_msat: Some(swaptype.amt_msat()),
+            amt_msat: Some(amt_msat),
         };
         unlocked_state.add_inbound_payment(swapstring.payment_hash, payment_info.clone());
         unlocked_state.add_outbound_payment(PaymentId(swapstring.payment_hash.0), payment_info);

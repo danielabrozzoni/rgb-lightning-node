@@ -41,7 +41,7 @@ use crate::{
         NetworkGraph, OnionMessenger, OutboundPaymentInfoStorage, PeerManager,
     },
     rgb::get_bitcoin_network,
-    swap::SwapType,
+    swap::Swap,
 };
 
 pub(crate) const LOGS_DIR: &str = "logs";
@@ -93,7 +93,7 @@ pub(crate) struct StaticState {
     pub(crate) bitcoind_client: Arc<BitcoindClient>,
 }
 
-pub(crate) type TradeMap = HashMap<PaymentHash, (ContractId, SwapType)>;
+pub(crate) type TradeMap = HashMap<PaymentHash, Swap>;
 
 pub(crate) struct UnlockedAppState {
     pub(crate) channel_manager: Arc<ChannelManager>,

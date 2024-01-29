@@ -1,81 +1,47 @@
-use std::convert::TryInto;
-use std::fmt;
-
 use lightning::ln::PaymentHash;
 use rgbstd::contract::ContractId;
+use std::convert::TryInto;
+use std::str::FromStr;
 
 use crate::utils::hex_str_to_vec;
 
-#[derive(Debug, Clone, Copy)]
-pub enum SwapType {
-    BuyAsset { asset_amount: u64, amt_msat: u64 },
-    SellAsset { asset_amount: u64, amt_msat: u64 },
+#[derive(Debug, Clone)]
+pub struct Swap {
+    pub(crate) qty_from: u64,
+    pub(crate) qty_to: u64,
+    pub(crate) from_asset: Option<ContractId>,
+    pub(crate) to_asset: Option<ContractId>,
 }
 
-impl fmt::Display for SwapType {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            SwapType::BuyAsset { .. } => write!(f, "buy"),
-            SwapType::SellAsset { .. } => write!(f, "sell"),
-        }
-    }
-}
-
-impl SwapType {
-    pub fn opposite(self) -> Self {
-        match self {
-            SwapType::BuyAsset {
-                asset_amount,
-                amt_msat,
-            } => SwapType::SellAsset {
-                asset_amount,
-                amt_msat,
-            },
-            SwapType::SellAsset {
-                asset_amount,
-                amt_msat,
-            } => SwapType::BuyAsset {
-                asset_amount,
-                amt_msat,
-            },
-        }
+impl Swap {
+    pub fn same_asset(&self) -> bool {
+        self.from_asset == self.to_asset
     }
 
-    pub fn is_buy(&self) -> bool {
-        matches!(self, SwapType::BuyAsset { .. })
+    pub fn from_btc(&self) -> bool {
+        self.from_asset.is_none()
     }
-
-    pub fn amt_msat(&self) -> u64 {
-        match self {
-            SwapType::BuyAsset { amt_msat, .. } | SwapType::SellAsset { amt_msat, .. } => *amt_msat,
-        }
-    }
-    pub fn asset_amount(&self) -> u64 {
-        match self {
-            SwapType::BuyAsset { asset_amount, .. } | SwapType::SellAsset { asset_amount, .. } => {
-                *asset_amount
-            }
-        }
+    pub fn to_btc(&self) -> bool {
+        self.to_asset.is_none()
     }
 }
 
 #[derive(Debug)]
 pub struct SwapString {
-    pub contract_id: ContractId,
-    pub swap_type: SwapType,
+    pub swap: Swap,
     pub expiry: u64,
     pub payment_hash: PaymentHash,
 }
 
-impl std::str::FromStr for SwapString {
+impl FromStr for SwapString {
     type Err = &'static str;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        let mut iter = s.split('/');
-        let amount = iter.next();
-        let contract_id = iter.next();
-        let side = iter.next();
-        let price = iter.next();
+        let mut iter = s.split("/");
+        let qty_from = iter.next();
+        let from_asset = iter.next();
+        let qty_to = iter.next();
+        let to_asset = iter.next();
         let expiry = iter.next();
         let payment_hash = iter.next();
 
@@ -83,53 +49,59 @@ impl std::str::FromStr for SwapString {
             return Err("Wrong number of parts");
         }
 
-        let amount = amount.unwrap().parse::<u64>();
-        let contract_id = ContractId::from_str(contract_id.unwrap());
-        let price = price.unwrap().parse::<u64>();
+        let qty_from = qty_from.unwrap().parse::<u64>();
+        let qty_to = qty_to.unwrap().parse::<u64>();
+        let from_asset = parse_opt_asset(from_asset.unwrap());
+        let to_asset = parse_opt_asset(to_asset.unwrap());
         let expiry = expiry.unwrap().parse::<u64>();
         let payment_hash = hex_str_to_vec(payment_hash.unwrap())
             .and_then(|vec| vec.try_into().ok())
             .map(PaymentHash);
 
-        if amount.is_err()
-            || contract_id.is_err()
-            || price.is_err()
+        if qty_from.is_err()
+            || from_asset.is_err()
+            || qty_to.is_err()
+            || to_asset.is_err()
             || expiry.is_err()
             || payment_hash.is_none()
         {
             return Err("Unable to parse");
         }
 
-        let amount = amount.unwrap();
-        let contract_id = contract_id.unwrap();
-        let price = price.unwrap();
+        let qty_from = qty_from.unwrap();
+        let qty_to = qty_to.unwrap();
+        let from_asset = from_asset.unwrap();
+        let to_asset = to_asset.unwrap();
         let expiry = expiry.unwrap();
         let payment_hash = payment_hash.unwrap();
 
-        if amount == 0 || price == 0 || expiry == 0 {
-            return Err("Amount, price and expiry should be positive");
+        if qty_from == 0 || qty_to == 0 || expiry == 0 {
+            return Err("Parsing swap string: qty_from, qty_to and expiry should be non-zero");
         }
 
-        let amt_msat = amount * price;
-        let swap_type = match side {
-            Some("buy") => SwapType::BuyAsset {
-                asset_amount: amount,
-                amt_msat,
-            },
-            Some("sell") => SwapType::SellAsset {
-                asset_amount: amount,
-                amt_msat,
-            },
-            _ => {
-                return Err("Invalid swap type");
-            }
+        let swap = Swap {
+            qty_from,
+            qty_to,
+            from_asset,
+            to_asset,
         };
 
+        if swap.same_asset() {
+            return Err("From and to assets should be different");
+        }
+
         Ok(SwapString {
-            contract_id,
-            swap_type,
+            swap,
             expiry,
             payment_hash,
         })
+    }
+}
+
+pub fn parse_opt_asset(asset: &str) -> Result<Option<ContractId>, baid58::Baid58ParseError> {
+    if asset == "btc" {
+        Ok(None)
+    } else {
+        ContractId::from_str(asset).map(Option::Some)
     }
 }

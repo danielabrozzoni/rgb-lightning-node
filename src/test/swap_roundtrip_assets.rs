@@ -1,6 +1,6 @@
 use super::*;
 
-const TEST_DIR_BASE: &str = "tmp/swap_roundtrip_sell/";
+const TEST_DIR_BASE: &str = "tmp/swap_roundtrip_assets/";
 const NODE1_PEER_PORT: u16 = 9821;
 const NODE2_PEER_PORT: u16 = 9822;
 const NODE3_PEER_PORT: u16 = 9823;
@@ -8,7 +8,7 @@ const NODE3_PEER_PORT: u16 = 9823;
 #[serial_test::serial]
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 #[traced_test]
-async fn do_sell_swap() {
+async fn do_buy_swap() {
     initialize();
 
     let test_dir_node1 = format!("{TEST_DIR_BASE}node1");
@@ -22,7 +22,8 @@ async fn do_sell_swap() {
     fund_and_create_utxos(node2_addr).await;
     fund_and_create_utxos(node3_addr).await;
 
-    let asset_id = issue_asset(node2_addr).await;
+    let asset_id_1 = issue_asset(node1_addr).await;
+    let asset_id_2 = issue_asset(node2_addr).await;
 
     let node2_info = node_info(node2_addr).await;
     let node2_pubkey = node2_info.pubkey;
@@ -30,10 +31,10 @@ async fn do_sell_swap() {
     let node1_info = node_info(node1_addr).await;
     let node1_pubkey = node1_info.pubkey;
 
-    open_colored_channel(node2_addr, &node1_pubkey, NODE1_PEER_PORT, 600, &asset_id).await;
-    open_channel(node1_addr, &node2_pubkey, NODE1_PEER_PORT, 5000000, 546000).await;
+    open_colored_channel(node1_addr, &node2_pubkey, NODE2_PEER_PORT, 600, &asset_id_1).await;
+    open_colored_channel(node2_addr, &node1_pubkey, NODE2_PEER_PORT, 100, &asset_id_2).await;
 
-    let maker_init_response = maker_init(node1_addr, 10, &asset_id, 50000, "btc", 3600).await;
+    let maker_init_response = maker_init(node1_addr, 50, &asset_id_2, 10, &asset_id_1, 3600).await;
     taker(node2_addr, maker_init_response.swapstring.clone()).await;
 
     let node1_trades = list_trades(node1_addr).await;
@@ -51,5 +52,5 @@ async fn do_sell_swap() {
     )
     .await;
 
-    wait_for_ln_balance(node1_addr, &asset_id, 10).await;
+    wait_for_ln_balance(node2_addr, &asset_id_1, 10).await;
 }

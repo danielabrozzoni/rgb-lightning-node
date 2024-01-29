@@ -72,7 +72,8 @@ use crate::disk::{FilesystemLogger, PENDING_SPENDABLE_OUTPUT_DIR};
 use crate::error::APIError;
 use crate::proxy::post_consignment;
 use crate::rgb::{
-    get_bitcoin_network, update_transition_beneficiary, RgbLibWalletWrapper, RgbUtilities,
+    get_bitcoin_network, get_rgb_channel_info_optional, update_transition_beneficiary,
+    RgbLibWalletWrapper, RgbUtilities,
 };
 use crate::routes::HTLCStatus;
 use crate::utils::{do_connect_peer, hex_str, AppState, StaticState, UnlockedAppState};
@@ -756,19 +757,17 @@ async fn handle_ldk_events(
             }
 
             let get_rgb_info = |channel_id| {
-                if is_channel_rgb(channel_id, &PathBuf::from(&static_state.ldk_data_dir)) {
-                    let (rgb_info, _) = get_rgb_channel_info(
-                        channel_id,
-                        &PathBuf::from(&static_state.ldk_data_dir),
-                    );
-                    Some((
+                get_rgb_channel_info_optional(
+                    channel_id,
+                    &PathBuf::from(&static_state.ldk_data_dir),
+                )
+                .map(|(rgb_info, _)| {
+                    (
                         rgb_info.contract_id,
                         rgb_info.local_rgb_amount,
                         rgb_info.remote_rgb_amount,
-                    ))
-                } else {
-                    None
-                }
+                    )
+                })
             };
 
             let inbound_channel = unlocked_state
@@ -784,14 +783,15 @@ async fn handle_ldk_events(
                 .find(|details| details.short_channel_id == Some(requested_next_hop_scid))
                 .expect("Should always be a valid channel");
 
+            dbg!(prev_short_channel_id);
+            dbg!(requested_next_hop_scid);
             let inbound_rgb_info = get_rgb_info(&inbound_channel.channel_id);
             let outbound_rgb_info = get_rgb_info(&outbound_channel.channel_id);
 
             tracing::debug!("EVENT: Requested swap with params inbound_msat={} outbound_msat={} inbound_rgb={:?} outbound_rgb={:?} inbound_contract_id={:?}, outbound_contract_id={:?}", inbound_amount_msat, expected_outbound_amount_msat, inbound_rgb_amount, expected_outbound_rgb_amount, inbound_rgb_info.map(|i| i.0), outbound_rgb_info.map(|i| i.0));
 
             let mut trades_lock = unlocked_state.taker_trades.lock().unwrap();
-            let (whitelist_contract_id, whitelist_swap_type) = match trades_lock.get(&payment_hash)
-            {
+            let whitelist_swap = match trades_lock.get(&payment_hash) {
                 None => {
                     tracing::error!("ERROR: rejecting non-whitelisted swap");
                     unlocked_state
@@ -803,53 +803,56 @@ async fn handle_ldk_events(
                 Some(x) => x,
             };
 
-            match whitelist_swap_type {
-                crate::swap::SwapType::BuyAsset {
-                    asset_amount,
-                    amt_msat,
-                } => {
-                    // We subtract HTLC_MIN_MSAT because a node receiving an RGB payment also receives that amount of sats with it as the payment amount,
-                    // so we exclude it from the calculation of how many sats we are effectively giving out.
-                    let net_msat_diff = expected_outbound_amount_msat.saturating_sub(
-                        inbound_amount_msat.saturating_sub(crate::routes::HTLC_MIN_MSAT),
-                    );
+            if whitelist_swap.from_btc() {
+                // We subtract HTLC_MIN_MSAT because a node receiving an RGB payment also receives that amount of sats with it as the payment amount,
+                // so we exclude it from the calculation of how many sats we are effectively giving out.
+                let net_msat_diff = (expected_outbound_amount_msat).saturating_sub(
+                    inbound_amount_msat.saturating_sub(crate::routes::HTLC_MIN_MSAT),
+                );
 
-                    if inbound_rgb_amount != Some(*asset_amount)
-                        || inbound_rgb_info.map(|x| x.0) != Some(*whitelist_contract_id)
-                        || net_msat_diff != *amt_msat
-                        || outbound_rgb_info.is_some()
-                    {
-                        tracing::error!(
-                            "ERROR: swap doesn't match the whitelisted info, rejecting it"
-                        );
-                        unlocked_state
-                            .channel_manager
-                            .fail_intercepted_htlc(intercept_id)
-                            .unwrap();
-                        return;
-                    }
+                if inbound_rgb_amount != Some(whitelist_swap.qty_to)
+                    || inbound_rgb_info.map(|x| x.0) != whitelist_swap.to_asset
+                    || net_msat_diff != whitelist_swap.qty_from
+                    || outbound_rgb_info.is_some()
+                {
+                    tracing::error!("ERROR: swap doesn't match the whitelisted info, rejecting it");
+                    unlocked_state
+                        .channel_manager
+                        .fail_intercepted_htlc(intercept_id)
+                        .unwrap();
+                    return;
                 }
-                crate::swap::SwapType::SellAsset {
-                    asset_amount,
-                    amt_msat,
-                } => {
-                    let net_msat_diff =
-                        inbound_amount_msat.saturating_sub(expected_outbound_amount_msat);
+            } else if whitelist_swap.to_btc() {
+                let net_msat_diff =
+                    inbound_amount_msat.saturating_sub(expected_outbound_amount_msat);
 
-                    if expected_outbound_rgb_amount != Some(*asset_amount)
-                        || outbound_rgb_info.map(|x| x.0) != Some(*whitelist_contract_id)
-                        || net_msat_diff != *amt_msat
-                        || inbound_rgb_info.is_some()
-                    {
-                        tracing::error!(
-                            "ERROR: swap doesn't match the whitelisted info, rejecting it"
-                        );
-                        unlocked_state
-                            .channel_manager
-                            .fail_intercepted_htlc(intercept_id)
-                            .unwrap();
-                        return;
-                    }
+                if expected_outbound_rgb_amount != Some(whitelist_swap.qty_from)
+                    || outbound_rgb_info.map(|x| x.0) != whitelist_swap.from_asset
+                    || net_msat_diff != whitelist_swap.qty_to
+                    || inbound_rgb_info.is_some()
+                {
+                    tracing::error!("ERROR: swap doesn't match the whitelisted info, rejecting it");
+                    unlocked_state
+                        .channel_manager
+                        .fail_intercepted_htlc(intercept_id)
+                        .unwrap();
+                    return;
+                }
+            } else {
+                let net_msat_diff = inbound_amount_msat.checked_sub(expected_outbound_amount_msat);
+
+                if net_msat_diff != Some(0)
+                    || expected_outbound_rgb_amount != Some(whitelist_swap.qty_from)
+                    || outbound_rgb_info.map(|x| x.0) != whitelist_swap.from_asset
+                    || inbound_rgb_amount != Some(whitelist_swap.qty_to)
+                    || inbound_rgb_info.map(|x| x.0) != whitelist_swap.to_asset
+                {
+                    tracing::error!("ERROR: swap doesn't match the whitelisted info, rejecting it");
+                    unlocked_state
+                        .channel_manager
+                        .fail_intercepted_htlc(intercept_id)
+                        .unwrap();
+                    return;
                 }
             }
 
