@@ -37,6 +37,9 @@ async fn do_buy_swap() {
     let maker_init_response = maker_init(node1_addr, 50, &asset_id_2, 10, &asset_id_1, 3600).await;
     taker(node2_addr, maker_init_response.swapstring.clone()).await;
 
+    // Reconnect in case the bug happens when opening channels
+    connect_peer(node1_addr, &node2_pubkey, &format!("127.0.0.1:{}", NODE2_PEER_PORT)).await;
+
     let node1_trades = list_trades(node1_addr).await;
     assert!(node1_trades.taker.is_empty());
     assert_eq!(node1_trades.maker.len(), 1);
