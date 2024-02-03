@@ -38,7 +38,12 @@ async fn do_buy_swap() {
     taker(node2_addr, maker_init_response.swapstring.clone()).await;
 
     // Reconnect in case the bug happens when opening channels
-    connect_peer(node1_addr, &node2_pubkey, &format!("127.0.0.1:{}", NODE2_PEER_PORT)).await;
+    connect_peer(
+        node1_addr,
+        &node2_pubkey,
+        &format!("127.0.0.1:{}", NODE2_PEER_PORT),
+    )
+    .await;
 
     let node1_trades = list_trades(node1_addr).await;
     assert!(node1_trades.taker.is_empty());

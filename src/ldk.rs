@@ -783,8 +783,6 @@ async fn handle_ldk_events(
                 .find(|details| details.short_channel_id == Some(requested_next_hop_scid))
                 .expect("Should always be a valid channel");
 
-            dbg!(prev_short_channel_id);
-            dbg!(requested_next_hop_scid);
             let inbound_rgb_info = get_rgb_info(&inbound_channel.channel_id);
             let outbound_rgb_info = get_rgb_info(&outbound_channel.channel_id);
 

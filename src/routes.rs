@@ -343,15 +343,6 @@ pub(crate) struct ListPeersResponse {
 }
 
 #[derive(Debug, Deserialize, Serialize)]
-pub(crate) struct Trade {
-    pub(crate) qty_from: u64,
-    pub(crate) qty_to: u64,
-    pub(crate) from_asset: String,
-    pub(crate) to_asset: String,
-    pub(crate) payment_hash: String,
-}
-
-#[derive(Debug, Deserialize, Serialize)]
 pub(crate) struct ListTradesResponse {
     pub(crate) maker: Vec<Trade>,
     pub(crate) taker: Vec<Trade>,
@@ -544,6 +535,15 @@ pub(crate) struct SignMessageResponse {
 #[derive(Deserialize, Serialize)]
 pub(crate) struct TakerRequest {
     pub(crate) swapstring: String,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+pub(crate) struct Trade {
+    pub(crate) qty_from: u64,
+    pub(crate) qty_to: u64,
+    pub(crate) from_asset: String,
+    pub(crate) to_asset: String,
+    pub(crate) payment_hash: String,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -1529,6 +1529,266 @@ pub(crate) async fn lock(
     .await
 }
 
+pub(crate) async fn maker_execute(
+    State(state): State<Arc<AppState>>,
+    WithRejection(Json(payload), _): WithRejection<Json<MakerExecuteRequest>, APIError>,
+) -> Result<Json<EmptyResponse>, APIError> {
+    no_cancel(async move {
+        let unlocked_state = state.check_unlocked().await?.clone().unwrap();
+        let ldk_data_dir_path = PathBuf::from(state.static_state.ldk_data_dir.clone());
+
+        let swapstring = SwapString::from_str(&payload.swapstring)
+            .map_err(|e| APIError::InvalidSwapString(payload.swapstring.clone(), e.to_string()))?;
+        let payment_secret = hex_str_to_vec(&payload.payment_secret)
+            .and_then(|data| data.try_into().ok())
+            .map(PaymentSecret)
+            .ok_or(APIError::InvalidPaymentSecret)?;
+        let taker_pk = bitcoin::secp256k1::PublicKey::from_str(&payload.taker_pubkey)
+            .map_err(|_| APIError::InvalidPubkey)?;
+
+        if get_current_timestamp() > swapstring.expiry {
+            return Err(APIError::ExpiredSwapOffer);
+        }
+
+        let payment_preimage = unlocked_state
+            .channel_manager
+            .get_payment_preimage(swapstring.payment_hash, payment_secret)
+            .map_err(|_| APIError::MissingSwapPaymentPreimage)?;
+
+        let swap = swapstring.swap;
+
+        let receive_hints = unlocked_state
+            .channel_manager
+            .list_usable_channels()
+            .iter()
+            .filter(|details| {
+                match get_rgb_channel_info_optional(&details.channel_id, &ldk_data_dir_path) {
+                    _ if swap.from_btc() => true,
+                    Some((rgb_info, _)) if Some(rgb_info.contract_id) == swap.from_asset => true,
+                    _ => false,
+                }
+            })
+            .map(|details| {
+                let config = details.counterparty.forwarding_info.as_ref().unwrap();
+                RouteHint(vec![RouteHintHop {
+                    src_node_id: details.counterparty.node_id,
+                    short_channel_id: details.short_channel_id.unwrap(),
+                    cltv_expiry_delta: config.cltv_expiry_delta,
+                    htlc_maximum_msat: None,
+                    htlc_minimum_msat: None,
+                    fees: RoutingFees {
+                        base_msat: config.fee_base_msat,
+                        proportional_millionths: config.fee_proportional_millionths,
+                    },
+                }])
+            })
+            .collect();
+
+        let first_leg = get_route(
+            &unlocked_state.channel_manager,
+            &unlocked_state.router,
+            unlocked_state.channel_manager.get_our_node_id(),
+            taker_pk,
+            if swap.to_btc() {
+                Some(swap.qty_to)
+            } else {
+                Some(HTLC_MIN_MSAT)
+            },
+            swap.to_asset,
+            vec![],
+        );
+        let second_leg = get_route(
+            &unlocked_state.channel_manager,
+            &unlocked_state.router,
+            taker_pk,
+            unlocked_state.channel_manager.get_our_node_id(),
+            if swap.from_btc() {
+                Some(swap.qty_from)
+            } else {
+                Some(HTLC_MIN_MSAT)
+            },
+            swap.from_asset,
+            receive_hints,
+        );
+
+        let (mut first_leg, mut second_leg) = match (first_leg, second_leg) {
+            (Some(f), Some(s)) => (f, s),
+            _ => {
+                return Err(APIError::NoRoute);
+            }
+        };
+
+        // Set swap flag
+        second_leg.paths[0].hops[0].short_channel_id |= IS_SWAP_SCID;
+
+        // Generally in the last hop the fee_amount is set to the payment amount, so we need to
+        // override it depending on what type of swap we are doing
+        if swap.to_btc() {
+            first_leg.paths[0]
+                .hops
+                .last_mut()
+                .expect("Path not to be empty")
+                .fee_msat = HTLC_MIN_MSAT;
+        } else {
+            first_leg.paths[0]
+                .hops
+                .last_mut()
+                .expect("Path not to be empty")
+                .fee_msat = 0;
+        }
+
+        let fullpaths = first_leg.paths[0]
+            .hops
+            .clone()
+            .into_iter()
+            .map(|mut hop| {
+                if !swap.to_btc() {
+                    hop.rgb_amount = Some(swap.qty_to);
+                    hop.payment_amount = HTLC_MIN_MSAT;
+                }
+                hop
+            })
+            .chain(second_leg.paths[0].hops.clone().into_iter().map(|mut hop| {
+                if !swap.from_btc() {
+                    hop.rgb_amount = Some(swap.qty_from);
+                    hop.payment_amount = HTLC_MIN_MSAT;
+                }
+                hop
+            }))
+            .collect::<Vec<_>>();
+
+        let route = Route {
+            paths: vec![LnPath {
+                hops: fullpaths,
+                blinded_tail: None,
+            }],
+            route_params: Some(RouteParameters {
+                payment_params: PaymentParameters::for_keysend(
+                    unlocked_state.channel_manager.get_our_node_id(),
+                    40,
+                    false,
+                ),
+                final_value_msat: 888333,
+                max_total_routing_fee_msat: None,
+            }),
+        };
+
+        if !swap.to_btc() {
+            write_rgb_payment_info_file(
+                &ldk_data_dir_path,
+                &swapstring.payment_hash,
+                swap.to_asset.unwrap(),
+                swap.qty_to,
+                false,
+            );
+        }
+
+        let (status, err) = match unlocked_state.channel_manager.send_spontaneous_payment(
+            &route,
+            Some(payment_preimage),
+            RecipientOnionFields::spontaneous_empty(),
+            PaymentId(swapstring.payment_hash.0),
+        ) {
+            Ok(_payment_hash) => {
+                tracing::debug!("EVENT: initiated swap");
+                (HTLCStatus::Pending, None)
+            }
+            Err(e) => {
+                tracing::warn!("ERROR: failed to send payment: {:?}", e);
+                (HTLCStatus::Failed, Some(e))
+            }
+        };
+
+        let amt_msat = if swap.to_btc() {
+            swap.qty_to
+        } else {
+            HTLC_MIN_MSAT
+        };
+
+        let payment_info = PaymentInfo {
+            preimage: None,
+            secret: None,
+            status,
+            amt_msat: Some(amt_msat),
+        };
+        unlocked_state.add_inbound_payment(swapstring.payment_hash, payment_info.clone());
+        unlocked_state.add_outbound_payment(PaymentId(swapstring.payment_hash.0), payment_info);
+
+        match err {
+            None => Ok(Json(EmptyResponse {})),
+            Some(e) => Err(APIError::FailedPayment(format!("{:?}", e))),
+        }
+    })
+    .await
+}
+
+pub(crate) async fn maker_init(
+    State(state): State<Arc<AppState>>,
+    WithRejection(Json(payload), _): WithRejection<Json<MakerInitRequest>, APIError>,
+) -> Result<Json<MakerInitResponse>, APIError> {
+    no_cancel(async move {
+        let unlocked_state = state.check_unlocked().await?.clone().unwrap();
+        let ldk_data_dir_path = PathBuf::from(state.static_state.ldk_data_dir.clone());
+
+        let from_asset = parse_opt_asset(&payload.from_asset)
+            .map_err(|_| APIError::InvalidAssetID(payload.from_asset.clone()))?;
+        let to_asset = parse_opt_asset(&payload.to_asset)
+            .map_err(|_| APIError::InvalidAssetID(payload.to_asset.clone()))?;
+
+        let qty_from = payload.qty_from;
+        let qty_to = payload.qty_to;
+
+        let swap = Swap {
+            from_asset,
+            to_asset,
+            qty_from,
+            qty_to,
+        };
+
+        // Check that we have enough assets to send
+        if let Some(to_asset) = to_asset {
+            let max_balance = get_max_local_rgb_amount(
+                to_asset,
+                &ldk_data_dir_path,
+                unlocked_state.channel_manager.list_channels().iter(),
+            );
+            if swap.qty_to > max_balance {
+                return Err(APIError::InsufficientAssets(max_balance, swap.qty_to));
+            }
+        }
+
+        let (payment_hash, payment_secret) = unlocked_state
+            .channel_manager
+            .create_inbound_payment(Some(546000), payload.timeout_secs, None)
+            .unwrap();
+        unlocked_state
+            .maker_trades
+            .lock()
+            .unwrap()
+            .insert(payment_hash, swap);
+
+        let expiry = get_current_timestamp() + payload.timeout_secs as u64;
+        let swapstring = format!(
+            "{}/{}/{}/{}/{}/{}",
+            qty_from,
+            from_asset.map(|c| c.to_string()).unwrap_or("btc".into()),
+            qty_to,
+            to_asset.map(|c| c.to_string()).unwrap_or("btc".into()),
+            expiry,
+            payment_hash,
+        );
+
+        let payment_secret = payment_secret.0.to_hex();
+        let payment_hash = payment_hash.0.to_hex();
+        Ok(Json(MakerInitResponse {
+            payment_hash,
+            payment_secret,
+            swapstring,
+        }))
+    })
+    .await
+}
+
 pub(crate) async fn network_info(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<NetworkInfoResponse>, APIError> {
@@ -1981,6 +2241,46 @@ pub(crate) async fn sign_message(
     Ok(Json(SignMessageResponse { signed_message }))
 }
 
+pub(crate) async fn taker(
+    State(state): State<Arc<AppState>>,
+    WithRejection(Json(payload), _): WithRejection<Json<TakerRequest>, APIError>,
+) -> Result<Json<EmptyResponse>, APIError> {
+    no_cancel(async move {
+        let unlocked_state = state.check_unlocked().await?.clone().unwrap();
+        let ldk_data_dir_path = PathBuf::from(state.static_state.ldk_data_dir.clone());
+        let swapstring = SwapString::from_str(&payload.swapstring)
+            .map_err(|e| APIError::InvalidSwapString(payload.swapstring.clone(), e.to_string()))?;
+
+        if get_current_timestamp() > swapstring.expiry {
+            return Err(APIError::ExpiredSwapOffer);
+        }
+
+        // We are selling assets, do we have enough?
+        if let Some(from_asset) = swapstring.swap.from_asset {
+            let max_balance = get_max_local_rgb_amount(
+                from_asset,
+                &ldk_data_dir_path,
+                unlocked_state.channel_manager.list_channels().iter(),
+            );
+            if swapstring.swap.qty_from > max_balance {
+                return Err(APIError::InsufficientAssets(
+                    max_balance,
+                    swapstring.swap.qty_from,
+                ));
+            }
+        }
+
+        unlocked_state
+            .taker_trades
+            .lock()
+            .unwrap()
+            .insert(swapstring.payment_hash, swapstring.swap);
+
+        Ok(Json(EmptyResponse {}))
+    })
+    .await
+}
+
 pub(crate) async fn unlock(
     State(state): State<Arc<AppState>>,
     WithRejection(Json(payload), _): WithRejection<Json<UnlockRequest>, APIError>,
@@ -2033,114 +2333,6 @@ pub(crate) async fn unlock(
     .await
 }
 
-pub(crate) async fn maker_init(
-    State(state): State<Arc<AppState>>,
-    WithRejection(Json(payload), _): WithRejection<Json<MakerInitRequest>, APIError>,
-) -> Result<Json<MakerInitResponse>, APIError> {
-    no_cancel(async move {
-        let unlocked_state = state.check_unlocked().await?.clone().unwrap();
-        let ldk_data_dir_path = PathBuf::from(state.static_state.ldk_data_dir.clone());
-
-        let from_asset = parse_opt_asset(&payload.from_asset)
-            .map_err(|_| APIError::InvalidAssetID(payload.from_asset.clone()))?;
-        let to_asset = parse_opt_asset(&payload.to_asset)
-            .map_err(|_| APIError::InvalidAssetID(payload.to_asset.clone()))?;
-
-        let qty_from = payload.qty_from;
-        let qty_to = payload.qty_to;
-
-        let swap = Swap {
-            from_asset,
-            to_asset,
-            qty_from,
-            qty_to,
-        };
-
-        // The user is buying assets = we (the service) are selling assets. Do we have
-        // enough?
-        if let Some(to_asset) = to_asset {
-            let max_balance = get_max_local_rgb_amount(
-                to_asset,
-                &ldk_data_dir_path,
-                unlocked_state.channel_manager.list_channels().iter(),
-            );
-            if swap.qty_to > max_balance {
-                return Err(APIError::InsufficientAssets(max_balance, swap.qty_to));
-            }
-        }
-
-        let (payment_hash, payment_secret) = unlocked_state
-            .channel_manager
-            .create_inbound_payment(Some(546000), payload.timeout_secs, None)
-            .unwrap();
-        unlocked_state
-            .maker_trades
-            .lock()
-            .unwrap()
-            .insert(payment_hash, swap);
-
-        let expiry = get_current_timestamp() + payload.timeout_secs as u64;
-        let swapstring = format!(
-            "{}/{}/{}/{}/{}/{}",
-            qty_from,
-            from_asset.map(|c| c.to_string()).unwrap_or("btc".into()),
-            qty_to,
-            to_asset.map(|c| c.to_string()).unwrap_or("btc".into()),
-            expiry,
-            payment_hash,
-        );
-
-        let payment_secret = payment_secret.0.to_hex();
-        let payment_hash = payment_hash.0.to_hex();
-        Ok(Json(MakerInitResponse {
-            payment_hash,
-            payment_secret,
-            swapstring,
-        }))
-    })
-    .await
-}
-
-pub(crate) async fn taker(
-    State(state): State<Arc<AppState>>,
-    WithRejection(Json(payload), _): WithRejection<Json<TakerRequest>, APIError>,
-) -> Result<Json<EmptyResponse>, APIError> {
-    no_cancel(async move {
-        let unlocked_state = state.check_unlocked().await?.clone().unwrap();
-        let ldk_data_dir_path = PathBuf::from(state.static_state.ldk_data_dir.clone());
-        let swapstring = SwapString::from_str(&payload.swapstring)
-            .map_err(|e| APIError::InvalidSwapString(payload.swapstring.clone(), e.to_string()))?;
-
-        if get_current_timestamp() > swapstring.expiry {
-            return Err(APIError::ExpiredSwapOffer);
-        }
-
-        // We are selling assets, do we have enough?
-        if let Some(from_asset) = swapstring.swap.from_asset {
-            let max_balance = get_max_local_rgb_amount(
-                from_asset,
-                &ldk_data_dir_path,
-                unlocked_state.channel_manager.list_channels().iter(),
-            );
-            if swapstring.swap.qty_from > max_balance {
-                return Err(APIError::InsufficientAssets(
-                    max_balance,
-                    swapstring.swap.qty_from,
-                ));
-            }
-        }
-
-        unlocked_state
-            .taker_trades
-            .lock()
-            .unwrap()
-            .insert(swapstring.payment_hash, swapstring.swap);
-
-        Ok(Json(EmptyResponse {}))
-    })
-    .await
-}
-
 fn get_route(
     channel_manager: &crate::ldk::ChannelManager,
     router: &crate::ldk::Router,
@@ -2177,197 +2369,4 @@ fn get_route(
     );
 
     route.ok()
-}
-
-pub(crate) async fn maker_execute(
-    State(state): State<Arc<AppState>>,
-    WithRejection(Json(payload), _): WithRejection<Json<MakerExecuteRequest>, APIError>,
-) -> Result<Json<EmptyResponse>, APIError> {
-    no_cancel(async move {
-        let unlocked_state = state.check_unlocked().await?.clone().unwrap();
-        let ldk_data_dir_path = PathBuf::from(state.static_state.ldk_data_dir.clone());
-
-        let swapstring = SwapString::from_str(&payload.swapstring)
-            .map_err(|e| APIError::InvalidSwapString(payload.swapstring.clone(), e.to_string()))?;
-        let payment_secret = hex_str_to_vec(&payload.payment_secret)
-            .and_then(|data| data.try_into().ok())
-            .map(PaymentSecret)
-            .ok_or(APIError::InvalidPaymentSecret)?;
-        let taker_pk = bitcoin::secp256k1::PublicKey::from_str(&payload.taker_pubkey)
-            .map_err(|_| APIError::InvalidPubkey)?;
-
-        if get_current_timestamp() > swapstring.expiry {
-            return Err(APIError::ExpiredSwapOffer);
-        }
-
-        let payment_preimage = unlocked_state
-            .channel_manager
-            .get_payment_preimage(swapstring.payment_hash, payment_secret)
-            .map_err(|_| APIError::MissingSwapPaymentPreimage)?;
-
-        let swap = swapstring.swap;
-
-        let receive_hints = unlocked_state
-            .channel_manager
-            .list_usable_channels()
-            .iter()
-            .filter(|details| {
-                match get_rgb_channel_info_optional(&details.channel_id, &ldk_data_dir_path) {
-                    _ if swap.from_btc() => true,
-                    Some((rgb_info, _)) if Some(rgb_info.contract_id) == swap.from_asset => true,
-                    _ => false,
-                }
-            })
-            .map(|details| {
-                let config = details.counterparty.forwarding_info.as_ref().unwrap();
-                RouteHint(vec![RouteHintHop {
-                    src_node_id: details.counterparty.node_id,
-                    short_channel_id: details.short_channel_id.unwrap(),
-                    cltv_expiry_delta: config.cltv_expiry_delta,
-                    htlc_maximum_msat: None,
-                    htlc_minimum_msat: None,
-                    fees: RoutingFees {
-                        base_msat: config.fee_base_msat,
-                        proportional_millionths: config.fee_proportional_millionths,
-                    },
-                }])
-            })
-            .collect();
-
-        let first_leg = get_route(
-            &unlocked_state.channel_manager,
-            &unlocked_state.router,
-            unlocked_state.channel_manager.get_our_node_id(),
-            taker_pk,
-            if swap.to_btc() {
-                Some(swap.qty_to)
-            } else {
-                Some(HTLC_MIN_MSAT)
-            },
-            swap.to_asset,
-            vec![],
-        );
-        let second_leg = get_route(
-            &unlocked_state.channel_manager,
-            &unlocked_state.router,
-            taker_pk,
-            unlocked_state.channel_manager.get_our_node_id(),
-            if swap.from_btc() {
-                Some(swap.qty_from)
-            } else {
-                Some(HTLC_MIN_MSAT)
-            },
-            swap.from_asset,
-            receive_hints,
-        );
-
-        let (mut first_leg, mut second_leg) = match (first_leg, second_leg) {
-            (Some(f), Some(s)) => (f, s),
-            _ => {
-                return Err(APIError::NoRoute);
-            }
-        };
-
-        // Set swap flag
-        second_leg.paths[0].hops[0].short_channel_id |= IS_SWAP_SCID;
-
-        // Generally in the last hop the fee_amount is set to the payment amount, so we need to
-        // override it depending on what type of swap we are doing
-        if swap.to_btc() {
-            first_leg.paths[0]
-                .hops
-                .last_mut()
-                .expect("Path not to be empty")
-                .fee_msat = HTLC_MIN_MSAT;
-        } else {
-            first_leg.paths[0]
-                .hops
-                .last_mut()
-                .expect("Path not to be empty")
-                .fee_msat = 0;
-        }
-
-        let fullpaths = first_leg.paths[0]
-            .hops
-            .clone()
-            .into_iter()
-            .map(|mut hop| {
-                if !swap.to_btc() {
-                    hop.rgb_amount = Some(swap.qty_to);
-                    hop.payment_amount = HTLC_MIN_MSAT;
-                }
-                hop
-            })
-            .chain(second_leg.paths[0].hops.clone().into_iter().map(|mut hop| {
-                if !swap.from_btc() {
-                    hop.rgb_amount = Some(swap.qty_from);
-                    hop.payment_amount = HTLC_MIN_MSAT;
-                }
-                hop
-            }))
-            .collect::<Vec<_>>();
-
-        let route = Route {
-            paths: vec![LnPath {
-                hops: fullpaths,
-                blinded_tail: None,
-            }],
-            route_params: Some(RouteParameters {
-                payment_params: PaymentParameters::for_keysend(
-                    unlocked_state.channel_manager.get_our_node_id(),
-                    40,
-                    false,
-                ),
-                final_value_msat: 888333,
-                max_total_routing_fee_msat: None,
-            }),
-        };
-
-        if !swap.to_btc() {
-            write_rgb_payment_info_file(
-                &ldk_data_dir_path,
-                &swapstring.payment_hash,
-                swap.to_asset.unwrap(),
-                swap.qty_to,
-                false,
-            );
-        }
-
-        let (status, err) = match unlocked_state.channel_manager.send_spontaneous_payment(
-            &route,
-            Some(payment_preimage),
-            RecipientOnionFields::spontaneous_empty(),
-            PaymentId(swapstring.payment_hash.0),
-        ) {
-            Ok(_payment_hash) => {
-                tracing::debug!("EVENT: initiated swap");
-                (HTLCStatus::Pending, None)
-            }
-            Err(e) => {
-                tracing::warn!("ERROR: failed to send payment: {:?}", e);
-                (HTLCStatus::Failed, Some(e))
-            }
-        };
-
-        let amt_msat = if swap.to_btc() {
-            swap.qty_to
-        } else {
-            HTLC_MIN_MSAT
-        };
-
-        let payment_info = PaymentInfo {
-            preimage: None,
-            secret: None,
-            status,
-            amt_msat: Some(amt_msat),
-        };
-        unlocked_state.add_inbound_payment(swapstring.payment_hash, payment_info.clone());
-        unlocked_state.add_outbound_payment(PaymentId(swapstring.payment_hash.0), payment_info);
-
-        match err {
-            None => Ok(Json(EmptyResponse {})),
-            Some(e) => Err(APIError::FailedPayment(format!("{:?}", e))),
-        }
-    })
-    .await
 }

@@ -355,6 +355,7 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ListTransactionsResponse'
+  # TODO DANI: probabilmente il tipo di ritorno di questo è da cambiare
   /listtrades:
     get:
       tags:
@@ -1133,20 +1134,21 @@ components:
     MakerInitRequest:
       type: object
       properties:
-        asset_amount:
+        qty_from:
           type: integer
-          example: 5000
-        asset_id:
+          example: 3000000
+        qty_to:
+          type: integer
+          example: 10
+        from_asset:
           type: string
           example: rgb:2dkSTbr-jFhznbPmo-TQafzswCN-av4gTsJjX-ttx6CNou5-M98k8Zd
-        side:
-          $ref: '#/components/schemas/MakerSide'
-        timeout_sec:
+        to_asset:
+          type: string
+          example: rgb:2eVw8uw-8G88LQ2tQ-kexM12SoD-nCX8DmQrw-yLMu6JDfK-xx1SCfc
+        timeout_secs:
           type: integer
           example: 100
-        price_msats_per_asset:
-          type: integer
-          example: 500
     MakerInitResponse:
       type: object
       properties:
@@ -1171,12 +1173,6 @@ components:
         taker_pubkey:
           type: string
           example: 02270dadcd6e7ba0ef707dac72acccae1a3607453a8dd2aef36ff3be4e0d31f043
-    MakerSide:
-      type: string
-      example: Buy
-      enum:
-        - Sell
-        - Buy
     NetworkInfoResponse:
       type: object
       properties:
@@ -1403,17 +1399,33 @@ components:
         payment_hash:
           type: string
           example: 7c2c95b9c2aa0a7d140495b664de7973b76561de833f0dd84def3efa08941664
-        amt_msat:
+        qty_from:
           type: integer
           example: 3000000
-        asset_amount:
+        qty_to:
           type: integer
           example: 10
-        asset_id:
+        from_asset:
           type: string
           example: rgb:2dkSTbr-jFhznbPmo-TQafzswCN-av4gTsJjX-ttx6CNou5-M98k8Zd
-        side:
-          $ref: '#/components/schemas/MakerSide'
+        to_asset:
+          type: string
+          example: rgb:2eVw8uw-8G88LQ2tQ-kexM12SoD-nCX8DmQrw-yLMu6JDfK-xx1SCfc
+    TradeEntry:
+      type: object
+      properties:
+        qty_from:
+          type: integer
+          example: 3000000
+        qty_to:
+          type: integer
+          example: 10
+        from_asset:
+          type: string
+          example: rgb:2dkSTbr-jFhznbPmo-TQafzswCN-av4gTsJjX-ttx6CNou5-M98k8Zd
+        to_asset:
+          type: string
+          example: rgb:2eVw8uw-8G88LQ2tQ-kexM12SoD-nCX8DmQrw-yLMu6JDfK-xx1SCfc
     Transaction:
       type: object
       properties:
