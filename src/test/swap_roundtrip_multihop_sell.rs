@@ -1,6 +1,6 @@
 use super::*;
 
-const TEST_DIR_BASE: &str = "tmp/swap_roundtrip_multihop_buy/";
+const TEST_DIR_BASE: &str = "tmp/swap_roundtrip_multihop_sell/";
 const NODE1_PEER_PORT: u16 = 9821;
 const NODE2_PEER_PORT: u16 = 9822;
 const NODE3_PEER_PORT: u16 = 9823;
@@ -8,7 +8,7 @@ const NODE3_PEER_PORT: u16 = 9823;
 #[serial_test::serial]
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 #[traced_test]
-async fn do_buy_multihop_swap() {
+async fn do_sell_multihop_swap() {
     initialize();
 
     let test_dir_node1 = format!("{TEST_DIR_BASE}node1");
@@ -29,6 +29,7 @@ async fn do_buy_multihop_swap() {
     let recipient_id = rgb_invoice(node2_addr, None).await.recipient_id;
     send_asset(node1_addr, &asset_id, 400, recipient_id).await;
     mine(false);
+    refresh_transfers(node2_addr).await;
     refresh_transfers(node2_addr).await;
     refresh_transfers(node1_addr).await;
     assert_eq!(asset_balance(node1_addr, &asset_id).await, 600);
@@ -61,27 +62,26 @@ async fn do_buy_multihop_swap() {
     )
     .await;
 
-    open_channel(node2_addr, &node1_pubkey, NODE1_PEER_PORT, 5000000, 546000).await;
-    open_channel(node3_addr, &node2_pubkey, NODE2_PEER_PORT, 5000000, 546000).await;
+    open_channel(node2_addr, &node1_pubkey, NODE1_PEER_PORT, 5000000, 0).await;
+    open_channel(node3_addr, &node2_pubkey, NODE2_PEER_PORT, 5000000, 0).await;
 
-    let maker_init_response =
-        maker_init(node1_addr, 10, &asset_id, MakerSide::Buy, 3600, 500).await;
-    let taker_response = taker(node3_addr, maker_init_response.swapstring.clone()).await;
+    let maker_init_response = maker_init(node3_addr, 10, Some(&asset_id), 3600, None, 5000).await;
+    taker(node1_addr, maker_init_response.swapstring.clone()).await;
 
-    let node1_trades = list_trades(node1_addr).await;
-    assert!(node1_trades.taker.is_empty());
-    assert_eq!(node1_trades.maker.len(), 1);
     let node3_trades = list_trades(node3_addr).await;
-    assert!(node3_trades.maker.is_empty());
-    assert_eq!(node3_trades.taker.len(), 1);
+    assert!(node3_trades.taker.is_empty());
+    assert_eq!(node3_trades.maker.len(), 1);
+    let node1_trades = list_trades(node1_addr).await;
+    assert!(node1_trades.maker.is_empty());
+    assert_eq!(node1_trades.taker.len(), 1);
 
     maker_execute(
-        node1_addr,
+        node3_addr,
         maker_init_response.swapstring,
         maker_init_response.payment_secret,
-        node3_pubkey,
+        node1_pubkey,
     )
     .await;
 
-    wait_for_ln_balance(node3_addr, &asset_id, 10).await;
+    wait_for_ln_balance(node1_addr, &asset_id, 490).await;
 }

@@ -785,17 +785,17 @@ async fn maker_execute(
 async fn maker_init(
     node_address: SocketAddr,
     qty_from: u64,
-    from_asset: &str,
+    from_asset: Option<&str>,
     qty_to: u64,
-    to_asset: &str,
-    timeout_secs: u32,
+    to_asset: Option<&str>,
+    timeout_sec: u32,
 ) -> MakerInitResponse {
     let payload = MakerInitRequest {
         qty_from,
         qty_to,
-        from_asset: from_asset.into(),
-        to_asset: to_asset.into(),
-        timeout_secs,
+        from_asset: from_asset.map(|a| a.into()),
+        to_asset: to_asset.map(|a| a.into()),
+        timeout_sec,
     };
     let res = reqwest::Client::new()
         .post(format!("http://{}/makerinit", node_address))
@@ -1166,10 +1166,11 @@ mod restart;
 mod send_receive;
 mod swap_roundtrip_assets;
 mod swap_roundtrip_buy;
-// mod swap_roundtrip_fail_amount_maker;
-// mod swap_roundtrip_fail_amount_taker;
-// mod swap_roundtrip_fail_timeout;
-// mod swap_roundtrip_fail_whitelist;
-// mod swap_roundtrip_multihop_buy;
-// mod swap_roundtrip_multihop_sell;
+mod swap_roundtrip_fail_amount_maker;
+mod swap_roundtrip_fail_amount_taker;
+mod swap_roundtrip_fail_timeout;
+mod swap_roundtrip_fail_whitelist;
+mod swap_roundtrip_multihop_asset_asset;
+mod swap_roundtrip_multihop_buy;
+mod swap_roundtrip_multihop_sell;
 mod swap_roundtrip_sell;

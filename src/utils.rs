@@ -4,9 +4,13 @@ use bitcoin::hashes::hex::ToHex;
 use bitcoin::secp256k1::PublicKey;
 use bitcoin::Network;
 use futures::Future;
+use lightning::ln::channelmanager::ChannelDetails;
 use lightning::ln::msgs::SocketAddress;
-use lightning::ln::{channelmanager::ChannelDetails, PaymentHash};
 use lightning::rgb_utils::{get_rgb_channel_info, BITCOIN_NETWORK_FNAME, ELECTRUM_URL_FNAME};
+use lightning::routing::router::{
+    Payee, PaymentParameters, Route, RouteHint, RouteParameters, Router as _,
+    DEFAULT_MAX_TOTAL_CLTV_EXPIRY_DELTA,
+};
 use lightning::{
     onion_message::OnionMessageContents,
     sign::KeysManager,
@@ -17,7 +21,6 @@ use magic_crypt::{new_magic_crypt, MagicCryptTrait};
 use reqwest::Client as RestClient;
 use rgb_core::ContractId;
 use rgb_lib::wallet::{Online, Wallet as RgbLibWallet};
-use std::collections::HashMap;
 use std::{
     fmt::Write,
     fs,
@@ -31,6 +34,7 @@ use tokio::sync::{Mutex as TokioMutex, MutexGuard as TokioMutexGuard};
 use tokio_util::sync::CancellationToken;
 
 use crate::ldk::Router;
+use crate::routes::{DEFAULT_FINAL_CLTV_EXPIRY_DELTA, HTLC_MIN_MSAT};
 use crate::{
     args::LdkUserInfo,
     bitcoind::BitcoindClient,
@@ -38,10 +42,9 @@ use crate::{
     error::{APIError, AppError},
     ldk::{
         BumpTxEventHandler, ChannelManager, InboundPaymentInfoStorage, LdkBackgroundServices,
-        NetworkGraph, OnionMessenger, OutboundPaymentInfoStorage, PeerManager,
+        NetworkGraph, OnionMessenger, OutboundPaymentInfoStorage, PeerManager, TradeMap,
     },
     rgb::get_bitcoin_network,
-    swap::Swap,
 };
 
 pub(crate) const LOGS_DIR: &str = "logs";
@@ -93,8 +96,6 @@ pub(crate) struct StaticState {
     pub(crate) bitcoind_client: Arc<BitcoindClient>,
 }
 
-pub(crate) type TradeMap = HashMap<PaymentHash, Swap>;
-
 pub(crate) struct UnlockedAppState {
     pub(crate) channel_manager: Arc<ChannelManager>,
     pub(crate) inbound_payments: Arc<Mutex<InboundPaymentInfoStorage>>,
@@ -120,6 +121,14 @@ impl UnlockedAppState {
 
     pub(crate) fn get_outbound_payments(&self) -> MutexGuard<OutboundPaymentInfoStorage> {
         self.outbound_payments.lock().unwrap()
+    }
+
+    pub(crate) fn get_maker_trades(&self) -> MutexGuard<TradeMap> {
+        self.maker_trades.lock().unwrap()
+    }
+
+    pub(crate) fn get_taker_trades(&self) -> MutexGuard<TradeMap> {
+        self.taker_trades.lock().unwrap()
     }
 
     pub(crate) fn get_rgb_wallet(&self) -> MutexGuard<RgbLibWallet> {
@@ -447,4 +456,42 @@ pub fn get_max_local_rgb_amount<'r>(
     }
 
     max_balance
+}
+
+pub(crate) fn get_route(
+    channel_manager: &crate::ldk::ChannelManager,
+    router: &crate::ldk::Router,
+    start: PublicKey,
+    dest: PublicKey,
+    final_value_msat: Option<u64>,
+    asset_id: Option<ContractId>,
+    hints: Vec<RouteHint>,
+) -> Option<Route> {
+    let inflight_htlcs = channel_manager.compute_inflight_htlcs();
+    let payment_params = PaymentParameters {
+        payee: Payee::Clear {
+            node_id: dest,
+            route_hints: hints,
+            features: None,
+            final_cltv_expiry_delta: DEFAULT_FINAL_CLTV_EXPIRY_DELTA,
+        },
+        expiry_time: None,
+        max_total_cltv_expiry_delta: DEFAULT_MAX_TOTAL_CLTV_EXPIRY_DELTA,
+        max_path_count: 1,
+        max_channel_saturation_power_of_half: 2,
+        previously_failed_channels: vec![],
+    };
+    let route = router.find_route(
+        &start,
+        &RouteParameters {
+            payment_params,
+            final_value_msat: final_value_msat.unwrap_or(HTLC_MIN_MSAT),
+            max_total_routing_fee_msat: None,
+        },
+        None,
+        inflight_htlcs,
+        asset_id,
+    );
+
+    route.ok()
 }

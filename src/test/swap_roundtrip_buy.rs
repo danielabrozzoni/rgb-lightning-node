@@ -8,7 +8,7 @@ const NODE3_PEER_PORT: u16 = 9823;
 #[serial_test::serial]
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 #[traced_test]
-async fn do_buy_swap() {
+async fn swap_roundtrip_buy() {
     initialize();
 
     let test_dir_node1 = format!("{TEST_DIR_BASE}node1");
@@ -33,8 +33,16 @@ async fn do_buy_swap() {
     open_colored_channel(node1_addr, &node2_pubkey, NODE2_PEER_PORT, 600, &asset_id).await;
     open_channel(node2_addr, &node1_pubkey, NODE2_PEER_PORT, 5000000, 546000).await;
 
-    let maker_init_response = maker_init(node1_addr, 50000, "btc", 10, &asset_id, 3600).await;
+    let maker_init_response = maker_init(node1_addr, 50000, None, 10, Some(&asset_id), 3600).await;
     taker(node2_addr, maker_init_response.swapstring.clone()).await;
+
+    // Reconnect in case the bug happens when opening channels
+    connect_peer(
+        node1_addr,
+        &node2_pubkey,
+        &format!("127.0.0.1:{}", NODE2_PEER_PORT),
+    )
+    .await;
 
     let node1_trades = list_trades(node1_addr).await;
     assert!(node1_trades.taker.is_empty());

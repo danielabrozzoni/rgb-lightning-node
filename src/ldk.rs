@@ -67,7 +67,9 @@ use tokio::task::JoinHandle;
 
 use crate::bdk::{broadcast_tx, get_bdk_wallet_seckey, sync_wallet};
 use crate::bitcoind::BitcoindClient;
-use crate::disk::{self, INBOUND_PAYMENTS_FNAME, OUTBOUND_PAYMENTS_FNAME};
+use crate::disk::{
+    self, INBOUND_PAYMENTS_FNAME, MAKER_TRADES_FNAME, OUTBOUND_PAYMENTS_FNAME, TAKER_TRADES_FNAME,
+};
 use crate::disk::{FilesystemLogger, PENDING_SPENDABLE_OUTPUT_DIR};
 use crate::error::APIError;
 use crate::proxy::post_consignment;
@@ -76,6 +78,7 @@ use crate::rgb::{
     RgbLibWalletWrapper, RgbUtilities,
 };
 use crate::routes::HTLCStatus;
+use crate::swap::Swap;
 use crate::utils::{do_connect_peer, hex_str, AppState, StaticState, UnlockedAppState};
 
 pub(crate) const FEE_RATE: f32 = 7.0;
@@ -120,7 +123,47 @@ impl_writeable_tlv_based!(OutboundPaymentInfoStorage, {
     (0, payments, required),
 });
 
+pub(crate) struct TradeMap {
+    pub(crate) trades: HashMap<PaymentHash, Swap>,
+}
+
+impl_writeable_tlv_based!(TradeMap, {
+    (0, trades, required),
+});
+
 impl UnlockedAppState {
+    pub(crate) fn add_maker_trade(&self, payment_hash: PaymentHash, swap: Swap) {
+        let mut maker_trades = self.get_maker_trades();
+        maker_trades.trades.insert(payment_hash, swap);
+        self.save_maker_trades(maker_trades);
+    }
+
+    pub(crate) fn add_taker_trade(&self, payment_hash: PaymentHash, swap: Swap) {
+        let mut taker_trades = self.get_taker_trades();
+        taker_trades.trades.insert(payment_hash, swap);
+        self.save_taker_trades(taker_trades);
+    }
+
+    fn save_maker_trades(&self, trades: MutexGuard<TradeMap>) {
+        self.fs_store
+            .write("", "", MAKER_TRADES_FNAME, &trades.encode())
+            .unwrap();
+    }
+
+    fn save_taker_trades(&self, trades: MutexGuard<TradeMap>) {
+        self.fs_store
+            .write("", "", TAKER_TRADES_FNAME, &trades.encode())
+            .unwrap();
+    }
+
+    pub(crate) fn maker_trades(&self) -> HashMap<PaymentHash, Swap> {
+        self.get_maker_trades().trades.clone()
+    }
+
+    pub(crate) fn taker_trades(&self) -> HashMap<PaymentHash, Swap> {
+        self.get_taker_trades().trades.clone()
+    }
+
     pub(crate) fn add_inbound_payment(&self, payment_hash: PaymentHash, payment_info: PaymentInfo) {
         let mut inbound = self.get_inbound_payments();
         inbound.payments.insert(payment_hash, payment_info);
@@ -212,10 +255,9 @@ impl UnlockedAppState {
 
     pub(crate) fn update_outbound_payment_status(&self, payment_id: PaymentId, status: HTLCStatus) {
         let mut outbound = self.get_outbound_payments();
-        if let Some(payment) = outbound.payments.get_mut(&payment_id) {
-            payment.status = status;
-            self.save_outbound_payments(outbound);
-        }
+        let payment = outbound.payments.get_mut(&payment_id).unwrap();
+        payment.status = status;
+        self.save_outbound_payments(outbound);
     }
 }
 
@@ -309,7 +351,7 @@ async fn handle_ldk_events(
                 &temporary_channel_id,
                 &PathBuf::from(&static_state.ldk_data_dir),
             );
-            let funding_tx = if is_colored {
+            let (unsigned_psbt, asset_id) = if is_colored {
                 let (rgb_info, _) = get_rgb_channel_info(
                     &temporary_channel_id,
                     &PathBuf::from(&static_state.ldk_data_dir),
@@ -338,16 +380,25 @@ async fn handle_ldk_events(
                 })
                 .await
                 .unwrap();
+                (unsigned_psbt, Some(asset_id))
+            } else {
+                let unsigned_psbt = unlocked_state
+                    .rgb_send_btc_begin(addr.to_address(), channel_value_satoshis, FEE_RATE)
+                    .unwrap();
+                (unsigned_psbt, None)
+            };
 
-                let signed_psbt = unlocked_state.rgb_sign_psbt(unsigned_psbt).unwrap();
-                let psbt = BdkPsbt::from_str(&signed_psbt).unwrap();
+            let signed_psbt = unlocked_state.rgb_sign_psbt(unsigned_psbt).unwrap();
+            let psbt = BdkPsbt::from_str(&signed_psbt).unwrap();
 
-                let funding_tx = psbt.clone().extract_tx();
-                let funding_txid = funding_tx.txid().to_string();
+            let funding_tx = psbt.clone().extract_tx();
+            let funding_txid = funding_tx.txid().to_string();
 
-                let psbt_path = format!("{}/psbt_{funding_txid}", static_state.ldk_data_dir);
-                fs::write(psbt_path, psbt.to_string()).unwrap();
+            let psbt_path = format!("{}/psbt_{funding_txid}", static_state.ldk_data_dir);
+            fs::write(psbt_path, psbt.to_string()).unwrap();
 
+            if is_colored {
+                let asset_id = asset_id.expect("Must be present");
                 let consignment_path = unlocked_state
                     .rgb_get_wallet_dir()
                     .join("transfers")
@@ -369,24 +420,7 @@ async fn handle_ldk_events(
                     tracing::error!("Cannot post consignment");
                     return;
                 }
-
-                funding_tx
-            } else {
-                let unsigned_psbt = unlocked_state
-                    .rgb_send_btc_begin(addr.to_address(), channel_value_satoshis, FEE_RATE)
-                    .unwrap();
-                let signed_psbt = unlocked_state.rgb_sign_psbt(unsigned_psbt).unwrap();
-
-                let psbt = BdkPsbt::from_str(&signed_psbt).unwrap();
-
-                let funding_tx = psbt.clone().extract_tx();
-                let funding_txid = funding_tx.txid().to_string();
-
-                let psbt_path = format!("{}/psbt_{funding_txid}", static_state.ldk_data_dir);
-                fs::write(psbt_path, psbt.to_string()).unwrap();
-
-                funding_tx
-            };
+            }
 
             let channel_manager_copy = unlocked_state.channel_manager.clone();
 
@@ -789,7 +823,7 @@ async fn handle_ldk_events(
             tracing::debug!("EVENT: Requested swap with params inbound_msat={} outbound_msat={} inbound_rgb={:?} outbound_rgb={:?} inbound_contract_id={:?}, outbound_contract_id={:?}", inbound_amount_msat, expected_outbound_amount_msat, inbound_rgb_amount, expected_outbound_rgb_amount, inbound_rgb_info.map(|i| i.0), outbound_rgb_info.map(|i| i.0));
 
             let mut trades_lock = unlocked_state.taker_trades.lock().unwrap();
-            let whitelist_swap = match trades_lock.get(&payment_hash) {
+            let whitelist_swap = match trades_lock.trades.get(&payment_hash) {
                 None => {
                     tracing::error!("ERROR: rejecting non-whitelisted swap");
                     unlocked_state
@@ -801,10 +835,12 @@ async fn handle_ldk_events(
                 Some(x) => x,
             };
 
-            if whitelist_swap.from_btc() {
-                // We subtract HTLC_MIN_MSAT because a node receiving an RGB payment also receives that amount of sats with it as the payment amount,
-                // so we exclude it from the calculation of how many sats we are effectively giving out.
-                let net_msat_diff = (expected_outbound_amount_msat).saturating_sub(
+            let mut fail = false;
+            if whitelist_swap.is_from_btc() {
+                // We subtract HTLC_MIN_MSAT because a node receiving an RGB payment also
+                // receives that amount of sats with it as the payment amount, so we exclude
+                // it from the calculation of how many sats we are effectively giving out.
+                let net_msat_diff = expected_outbound_amount_msat.saturating_sub(
                     inbound_amount_msat.saturating_sub(crate::routes::HTLC_MIN_MSAT),
                 );
 
@@ -813,14 +849,9 @@ async fn handle_ldk_events(
                     || net_msat_diff != whitelist_swap.qty_from
                     || outbound_rgb_info.is_some()
                 {
-                    tracing::error!("ERROR: swap doesn't match the whitelisted info, rejecting it");
-                    unlocked_state
-                        .channel_manager
-                        .fail_intercepted_htlc(intercept_id)
-                        .unwrap();
-                    return;
+                    fail = true;
                 }
-            } else if whitelist_swap.to_btc() {
+            } else if whitelist_swap.is_to_btc() {
                 let net_msat_diff =
                     inbound_amount_msat.saturating_sub(expected_outbound_amount_msat);
 
@@ -829,12 +860,7 @@ async fn handle_ldk_events(
                     || net_msat_diff != whitelist_swap.qty_to
                     || inbound_rgb_info.is_some()
                 {
-                    tracing::error!("ERROR: swap doesn't match the whitelisted info, rejecting it");
-                    unlocked_state
-                        .channel_manager
-                        .fail_intercepted_htlc(intercept_id)
-                        .unwrap();
-                    return;
+                    fail = true;
                 }
             } else {
                 let net_msat_diff = inbound_amount_msat.checked_sub(expected_outbound_amount_msat);
@@ -845,17 +871,21 @@ async fn handle_ldk_events(
                     || inbound_rgb_amount != Some(whitelist_swap.qty_to)
                     || inbound_rgb_info.map(|x| x.0) != whitelist_swap.to_asset
                 {
-                    tracing::error!("ERROR: swap doesn't match the whitelisted info, rejecting it");
-                    unlocked_state
-                        .channel_manager
-                        .fail_intercepted_htlc(intercept_id)
-                        .unwrap();
-                    return;
+                    fail = true;
                 }
             }
 
+            if fail {
+                tracing::error!("ERROR: swap doesn't match the whitelisted info, rejecting it");
+                unlocked_state
+                    .channel_manager
+                    .fail_intercepted_htlc(intercept_id)
+                    .unwrap();
+                return;
+            }
+
             tracing::debug!("Swap is whitelisted, forwarding the htlc...");
-            trades_lock.remove(&payment_hash);
+            trades_lock.trades.remove(&payment_hash);
 
             unlocked_state
                 .channel_manager
@@ -1664,6 +1694,15 @@ pub(crate) async fn start_ldk(
     // Persist ChannelManager and NetworkGraph
     let persister = Arc::new(FilesystemStore::new(ldk_data_dir_path.clone()));
 
+    let maker_trades = Arc::new(Mutex::new(disk::read_trades_info(Path::new(&format!(
+        "{}/{}",
+        ldk_data_dir, MAKER_TRADES_FNAME
+    )))));
+    let taker_trades = Arc::new(Mutex::new(disk::read_trades_info(Path::new(&format!(
+        "{}/{}",
+        ldk_data_dir, TAKER_TRADES_FNAME
+    )))));
+
     let unlocked_state = Arc::new(UnlockedAppState {
         channel_manager: Arc::clone(&channel_manager),
         inbound_payments,
@@ -1677,8 +1716,8 @@ pub(crate) async fn start_ldk(
         bump_tx_event_handler,
         rgb_wallet,
         rgb_online,
-        maker_trades: Arc::new(Mutex::new(HashMap::new())),
-        taker_trades: Arc::new(Mutex::new(HashMap::new())),
+        maker_trades,
+        taker_trades,
         router: Arc::clone(&router),
     });
 

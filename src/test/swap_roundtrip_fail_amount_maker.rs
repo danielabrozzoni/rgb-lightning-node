@@ -34,5 +34,5 @@ async fn swap_fail_amount_maker() {
     open_colored_channel(node1_addr, &node2_pubkey, NODE2_PEER_PORT, 600, &asset_id).await;
     open_channel(node2_addr, &node1_pubkey, NODE2_PEER_PORT, 5000000, 546000).await;
 
-    maker_init(node1_addr, 1000, &asset_id, MakerSide::Buy, 3600, 5000).await;
+    maker_init(node1_addr, 3600000, None, 1000, Some(&asset_id), 5000).await;
 }
