@@ -65,9 +65,8 @@ async fn do_sell_multihop_swap() {
     open_channel(node2_addr, &node1_pubkey, NODE1_PEER_PORT, 5000000, 0).await;
     open_channel(node3_addr, &node2_pubkey, NODE2_PEER_PORT, 5000000, 0).await;
 
-    let maker_init_response =
-        maker_init(node3_addr, 10, &asset_id, MakerInitSide::Sell, 3600, 5000).await;
-    let taker_response = taker(node1_addr, maker_init_response.swapstring.clone()).await;
+    let maker_init_response = maker_init(node3_addr, 10, Some(&asset_id), 3600, None, 5000).await;
+    taker(node1_addr, maker_init_response.swapstring.clone()).await;
 
     let node3_trades = list_trades(node3_addr).await;
     assert!(node3_trades.taker.is_empty());
@@ -80,7 +79,7 @@ async fn do_sell_multihop_swap() {
         node3_addr,
         maker_init_response.swapstring,
         maker_init_response.payment_secret,
-        taker_response.our_pubkey,
+        node1_pubkey,
     )
     .await;
 

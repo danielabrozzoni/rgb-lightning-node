@@ -19,10 +19,9 @@ use crate::routes::{
     IssueAssetResponse, KeysendRequest, KeysendResponse, LNInvoiceRequest, LNInvoiceResponse,
     ListAssetsResponse, ListChannelsResponse, ListPaymentsResponse, ListPeersResponse,
     ListTradesResponse, ListUnspentsResponse, MakerExecuteRequest, MakerInitRequest,
-    MakerInitResponse, MakerInitSide, NodeInfoResponse, OpenChannelRequest, OpenChannelResponse,
-    Payment, Peer, RestoreRequest, RgbInvoiceRequest, RgbInvoiceResponse, SendAssetRequest,
-    SendAssetResponse, SendPaymentRequest, SendPaymentResponse, TakerRequest, TakerResponse,
-    UnlockRequest, Unspent,
+    MakerInitResponse, NodeInfoResponse, OpenChannelRequest, OpenChannelResponse, Payment, Peer,
+    RestoreRequest, RgbInvoiceRequest, RgbInvoiceResponse, SendAssetRequest, SendAssetResponse,
+    SendPaymentRequest, SendPaymentResponse, TakerRequest, UnlockRequest, Unspent,
 };
 use crate::utils::PROXY_ENDPOINT_REGTEST;
 
@@ -785,18 +784,18 @@ async fn maker_execute(
 
 async fn maker_init(
     node_address: SocketAddr,
-    amount: u64,
-    asset_id: &str,
-    side: MakerInitSide,
-    timeout_secs: u32,
-    price_msats_per_token: u64,
+    qty_from: u64,
+    from_asset: Option<&str>,
+    qty_to: u64,
+    to_asset: Option<&str>,
+    timeout_sec: u32,
 ) -> MakerInitResponse {
     let payload = MakerInitRequest {
-        amount,
-        asset_id: asset_id.to_owned(),
-        side,
-        timeout_secs,
-        price_msats_per_token,
+        qty_from,
+        qty_to,
+        from_asset: from_asset.map(|a| a.into()),
+        to_asset: to_asset.map(|a| a.into()),
+        timeout_sec,
     };
     let res = reqwest::Client::new()
         .post(format!("http://{}/makerinit", node_address))
@@ -914,7 +913,7 @@ async fn send_payment(node_address: SocketAddr, invoice: String) -> Payment {
     }
 }
 
-async fn taker(node_address: SocketAddr, swapstring: String) -> TakerResponse {
+async fn taker(node_address: SocketAddr, swapstring: String) -> EmptyResponse {
     let payload = TakerRequest { swapstring };
     let res = reqwest::Client::new()
         .post(format!("http://{}/taker", node_address))
@@ -924,7 +923,7 @@ async fn taker(node_address: SocketAddr, swapstring: String) -> TakerResponse {
         .unwrap();
     _check_response_is_ok(res)
         .await
-        .json::<TakerResponse>()
+        .json::<EmptyResponse>()
         .await
         .unwrap()
 }
@@ -1165,11 +1164,13 @@ mod open_after_double_send;
 mod payment;
 mod restart;
 mod send_receive;
+mod swap_roundtrip_assets;
 mod swap_roundtrip_buy;
 mod swap_roundtrip_fail_amount_maker;
 mod swap_roundtrip_fail_amount_taker;
 mod swap_roundtrip_fail_timeout;
 mod swap_roundtrip_fail_whitelist;
+mod swap_roundtrip_multihop_asset_asset;
 mod swap_roundtrip_multihop_buy;
 mod swap_roundtrip_multihop_sell;
 mod swap_roundtrip_sell;

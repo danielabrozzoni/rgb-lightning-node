@@ -33,10 +33,24 @@ async fn swap_fail_whitelist() {
     open_colored_channel(node1_addr, &node2_pubkey, NODE2_PEER_PORT, 600, &asset_id).await;
     open_channel(node2_addr, &node1_pubkey, NODE2_PEER_PORT, 5000000, 546000).await;
 
-    let maker_init_response =
-        maker_init(node1_addr, 10, &asset_id, MakerInitSide::Buy, 3600, 5000).await;
+    let maker_init_response = maker_init(node1_addr, 36000, None, 10, Some(&asset_id), 5000).await;
     // We don't execute the taker command, so the swapstring is not going to be whitelisted, and the swap will fail.
-    // let taker_response = taker(node2_addr, maker_init_response.swapstring.clone()).await;
+    //let taker_response = taker(node2_addr, maker_init_response.swapstring.clone()).await;
+
+    // Reconnect in case the bug happens when opening channels
+    connect_peer(
+        node2_addr,
+        &node1_pubkey,
+        &format!("127.0.0.1:{}", NODE1_PEER_PORT),
+    )
+    .await;
+    connect_peer(
+        node1_addr,
+        &node2_pubkey,
+        &format!("127.0.0.1:{}", NODE2_PEER_PORT),
+    )
+    .await;
+
     maker_execute(
         node1_addr,
         maker_init_response.swapstring,
