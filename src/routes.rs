@@ -1632,27 +1632,37 @@ pub(crate) async fn maker_execute(
             .hops
             .last_mut()
             .expect("Path not to be empty")
-            .fee_msat = if swap.is_to_btc() { HTLC_MIN_MSAT } else { 0 };
+            .fee_msat = 0;
 
-        let fullpaths = first_leg.paths[0]
+        /*
+        second_leg.paths[0]
+            .hops
+            .last_mut()
+            .expect("Path not to be empty")
+            .payment_amount = HTLC_MIN_MSAT;
+        */
+
+        let mut fullpaths = first_leg.paths[0]
             .hops
             .clone()
             .into_iter()
             .map(|mut hop| {
                 if !swap.is_to_btc() {
                     hop.rgb_amount = Some(swap.qty_to);
-                    hop.payment_amount = HTLC_MIN_MSAT;
+                    hop.payment_amount = 0;
                 }
                 hop
             })
             .chain(second_leg.paths[0].hops.clone().into_iter().map(|mut hop| {
                 if !swap.is_from_btc() {
                     hop.rgb_amount = Some(swap.qty_from);
-                    hop.payment_amount = HTLC_MIN_MSAT;
+                    hop.payment_amount = 0;
                 }
                 hop
             }))
             .collect::<Vec<_>>();
+
+        fullpaths.iter_mut().last().unwrap().payment_amount = HTLC_MIN_MSAT;
 
         // Skip last fee because it's equal to the payment amount
         let total_fee = fullpaths
@@ -1661,6 +1671,7 @@ pub(crate) async fn maker_execute(
             .skip(1)
             .map(|hop| hop.fee_msat)
             .sum::<u64>();
+        dbg!(&fullpaths.iter());
         if total_fee >= MAX_SWAP_FEE_MSAT {
             return Err(APIError::FailedPayment(format!(
                 "Fee too high: {}",

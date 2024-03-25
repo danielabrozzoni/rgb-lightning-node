@@ -85,7 +85,7 @@ async fn do_sell_multihop_swap() {
     )
     .await;
 
-    let maker_init_response = maker_init(node3_addr, 10, Some(&asset_id), 3600, None, 5000).await;
+    let maker_init_response = maker_init(node3_addr, 10, Some(&asset_id), 1234, None, 5000).await;
     taker(node1_addr, maker_init_response.swapstring.clone()).await;
 
     let node3_trades = list_trades(node3_addr).await;

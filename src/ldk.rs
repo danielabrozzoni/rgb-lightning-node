@@ -902,6 +902,7 @@ async fn handle_ldk_events(
 
             let mut fail = false;
             if whitelist_swap.is_from_btc() {
+                println!("From BTC");
                 let net_msat_diff = expected_outbound_amount_msat.checked_sub(inbound_amount_msat);
 
                 if inbound_rgb_amount != Some(whitelist_swap.qty_to)
@@ -912,8 +913,18 @@ async fn handle_ldk_events(
                     fail = true;
                 }
             } else if whitelist_swap.is_to_btc() {
+                println!("To BTC");
+                dbg!(&inbound_amount_msat);
+                dbg!(&expected_outbound_amount_msat);
                 let net_msat_diff =
                     inbound_amount_msat.saturating_sub(expected_outbound_amount_msat);
+                dbg!(&net_msat_diff);
+                dbg!(&expected_outbound_rgb_amount, &whitelist_swap.qty_from);
+                dbg!(outbound_rgb_info.map(|x| x.0), whitelist_swap.from_asset);
+                // Il problema è qui:
+                // la diff è 0, mentre la quantity è 1234 (quanto sto scambiando)
+                dbg!(net_msat_diff, whitelist_swap.qty_to);
+                dbg!(inbound_rgb_info.is_some());
 
                 if expected_outbound_rgb_amount != Some(whitelist_swap.qty_from)
                     || outbound_rgb_info.map(|x| x.0) != whitelist_swap.from_asset
