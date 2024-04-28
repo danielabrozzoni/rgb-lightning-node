@@ -1656,6 +1656,7 @@ pub(crate) async fn maker_execute(
             .chain(second_leg.paths[0].hops.clone().into_iter().map(|mut hop| {
                 if !swap.is_from_btc() {
                     hop.rgb_amount = Some(swap.qty_from);
+                    //hop.payment_amount = hop.fee_msat;
                     hop.payment_amount = 0;
                 }
                 hop

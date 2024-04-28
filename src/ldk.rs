@@ -904,10 +904,12 @@ async fn handle_ldk_events(
             if whitelist_swap.is_from_btc() {
                 println!("From BTC");
                 let net_msat_diff = expected_outbound_amount_msat.checked_sub(inbound_amount_msat);
+                dbg!(expected_outbound_amount_msat);
+                dbg!(inbound_amount_msat);
 
-                if inbound_rgb_amount != Some(whitelist_swap.qty_to)
+                if dbg!(inbound_rgb_amount) != dbg!(Some(whitelist_swap.qty_to))
                     || inbound_rgb_info.map(|x| x.0) != whitelist_swap.to_asset
-                    || net_msat_diff != Some(whitelist_swap.qty_from)
+                    || dbg!(net_msat_diff) != dbg!(Some(whitelist_swap.qty_from))
                     || outbound_rgb_info.is_some()
                 {
                     fail = true;
